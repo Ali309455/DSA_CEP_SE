@@ -1,4 +1,4 @@
-// console_main.cpp - a command-line front end for the engine (phase 1).
+// console_main.cpp - a command-line front end for the engine (phases 1-3).
 // Lines and columns are 1-based here (as a user would count them).
 
 #include <cerrno>
@@ -8,11 +8,14 @@
 
 #include "DynArray.h"
 #include "Document.h"
+#include "Editor.h"
 #include "FileIO.h"
+#include "Search.h"
 
 static void printHelp() {
     std::cout <<
-        "Commands (line and column numbers start at 1):\n"
+        "Commands (line and column numbers start at 1).\n"
+        "Words in <angle brackets> are placeholders: type the value WITHOUT the < >.\n"
         "  File:\n"
         "    new                         start an empty document\n"
         "    open <file>                 open an existing text file\n"
@@ -32,8 +35,20 @@ static void printHelp() {
         "    delword <line> <col>        delete the word at a position\n"
         "    delrange <l1> <c1> <l2> <c2>  delete from (l1,c1) up to, not including, (l2,c2)\n"
         "    dellines <from> [to]        delete one line or a range of lines\n"
-        "  help                          show this list\n"
-        "  (search, replace and undo arrive in the next phases)\n";
+        "  Replace:\n"
+        "    replace <l1> <c1> <l2> <c2> <text>  replace a range of text with <text>\n"
+        "  Undo / Redo:\n"
+        "    undo                        reverse the last edit\n"
+        "    redo                        apply an undone edit again\n"
+        "    history                     how many steps can be undone / redone\n"
+        "  Search / replace by text (KMP):\n"
+        "    find [-i] [-w] <text>       list every place <text> occurs (line:column)\n"
+        "    replaceall [-i] [-w] <old> <new>      replace every occurrence (one undo step)\n"
+        "    replacenth [-i] [-w] <n> <old> <new>  replace the n-th occurrence (n as in 'find')\n"
+        "      -i ignore upper/lower case     -w whole words only\n"
+        "      Put text in \"double quotes\" if it has spaces or is empty (\"\"); inside quotes\n"
+        "      \\n is a line break, \\t a tab, \\\" a quote, \\\\ a backslash.\n"
+        "  help                          show this list\n";
 }
 
 static bool parseNum(const std::string& s, size_t& out) {
@@ -123,12 +138,74 @@ static void needNumbers(const DynArray<std::string>& w, size_t count, size_t* ou
         if (!parseNum(w[i], out[i])) throw std::invalid_argument(std::string("'") + w[i] + "' is not a valid number. Usage: " + usage);
 }
 
-static void requireNotEmpty(const Document& doc) {
-    if (doc.isEmpty()) throw std::logic_error("The document is empty, there is nothing to delete.");
+static void requireNotEmpty(const Document& doc, const char* verb = "delete") {
+    if (doc.isEmpty()) throw std::logic_error(std::string("The document is empty, there is nothing to ") + verb + ".");
+}
+
+static bool isBlank(char c) { return c == ' ' || c == '\t'; }
+
+// Read one argument from 'in' starting at 'i': either "text in quotes" (with the
+// escapes \n \t \" \\) or a bare word. Returns false when only blanks are left.
+static bool takeArg(const std::string& in, size_t& i, std::string& out) {
+    while (i < in.size() && isBlank(in[i])) ++i;
+    if (i >= in.size()) return false;
+    out.clear();
+    if (in[i] == '"') {
+        ++i;
+        bool closed = false;
+        while (i < in.size()) {
+            char c = in[i++];
+            if (c == '"') { closed = true; break; }
+            if (c == '\\' && i < in.size()) {
+                char e = in[i++];
+                if (e == 'n') out.push_back('\n');
+                else if (e == 't') out.push_back('\t');
+                else if (e == '"' || e == '\\') out.push_back(e);
+                else { out.push_back('\\'); out.push_back(e); }
+            } else {
+                out.push_back(c);
+            }
+        }
+        if (!closed) throw std::invalid_argument("Missing closing quote (\").");
+        if (i < in.size() && !isBlank(in[i])) throw std::invalid_argument("Unexpected text right after the closing quote.");
+    } else {
+        while (i < in.size() && !isBlank(in[i])) out.push_back(in[i++]);
+    }
+    return true;
+}
+
+// Leading options: -i  -w  -iw  (and -- to stop). Moves 'i' past them.
+static void takeFlags(const std::string& in, size_t& i, SearchOptions& opt) {
+    while (true) {
+        size_t j = i;
+        while (j < in.size() && isBlank(in[j])) ++j;
+        if (j >= in.size() || in[j] != '-') return;
+        size_t k = j + 1;
+        if (k < in.size() && in[k] == '-' && (k + 1 >= in.size() || isBlank(in[k + 1]))) { i = k + 1; return; }
+        bool any = false, valid = true;
+        SearchOptions next = opt;
+        while (k < in.size() && !isBlank(in[k])) {
+            if (in[k] == 'i') next.matchCase = false;
+            else if (in[k] == 'w') next.wholeWord = true;
+            else { valid = false; break; }
+            any = true;
+            ++k;
+        }
+        if (!any || !valid) return;          // not a flag: it is part of the text (e.g. "-x" or "-5")
+        opt = next;
+        i = k;
+    }
+}
+
+static std::string describe(const SearchOptions& o) {
+    std::string s = o.matchCase ? "case sensitive" : "ignoring case";
+    if (o.wholeWord) s += ", whole words";
+    return s;
 }
 
 // Returns false when the user wants to quit.
-static bool execute(Document& doc, const std::string& input) {
+static bool execute(Editor& ed, const std::string& input) {
+    const Document& doc = ed.doc();
     DynArray<std::string> w;
     std::string rest;
     if (takeWords(input, 1, w, rest) == 0) return true;
@@ -140,20 +217,20 @@ static bool execute(Document& doc, const std::string& input) {
     } else if (cmd == "quit" || cmd == "exit") {
         if (okToDiscard(doc)) return false;
     } else if (cmd == "new") {
-        if (okToDiscard(doc)) { doc.clear(); std::cout << "New empty document.\n"; }
+        if (okToDiscard(doc)) { ed.newDocument(); std::cout << "New empty document.\n"; }
     } else if (cmd == "open") {
         if (rest.empty()) throw std::invalid_argument("Usage: open <file>");
         if (!okToDiscard(doc)) return true;
-        IOResult r = openFile(doc, rest);
+        IOResult r = ed.open(rest);
         std::cout << r.message;
         if (r.ok) std::cout << " (" << doc.lineCount() << " lines, " << doc.charCount() << " characters)";
         std::cout << "\n";
     } else if (cmd == "save") {
         if (doc.path().empty()) throw std::logic_error("This document has no filename yet. Use: saveas <file>");
-        std::cout << saveFile(doc, doc.path()).message << "\n";
+        std::cout << ed.save(doc.path()).message << "\n";
     } else if (cmd == "saveas") {
         if (rest.empty()) throw std::invalid_argument("Usage: saveas <file>");
-        std::cout << saveFile(doc, rest).message << "\n";
+        std::cout << ed.save(rest).message << "\n";
     } else if (cmd == "info") {
         info(doc);
     } else if (cmd == "show") {
@@ -167,8 +244,8 @@ static bool execute(Document& doc, const std::string& input) {
                                     " is not valid (the document has " + std::to_string(doc.lineCount()) + " line(s)).");
         show(doc, from - 1, to - 1);
     } else if (cmd == "append") {
-        if (doc.isEmpty()) doc.insertText(Pos{0, 0}, rest);
-        else doc.insertLineBefore(doc.lineCount(), rest);
+        if (doc.isEmpty()) ed.insertText(Pos{0, 0}, rest);
+        else ed.insertLineBefore(doc.lineCount(), rest);
         std::cout << "Added at line " << doc.lineCount() << ".\n";
     } else if (cmd == "addline") {
         takeWords(rest, 1, w, rest);
@@ -176,19 +253,19 @@ static bool execute(Document& doc, const std::string& input) {
         if (n[0] < 1 || n[0] > doc.lineCount() + 1)
             throw std::out_of_range("Line " + std::to_string(n[0]) + " is not valid (use 1 to " +
                                     std::to_string(doc.lineCount() + 1) + ").");
-        doc.insertLineBefore(n[0] - 1, rest);
+        ed.insertLineBefore(n[0] - 1, rest);
         std::cout << "Inserted new line " << n[0] << ".\n";
     } else if (cmd == "ins") {
         takeWords(rest, 2, w, rest);
         needNumbers(w, 2, n, "ins <line> <col> <text>");
         if (rest.empty()) throw std::invalid_argument("Nothing to insert. Usage: ins <line> <col> <text>");
         Pos p = userPos(doc, n[0], n[1]);
-        doc.insertText(p, rest);
+        ed.insertText(p, rest);
         std::cout << "Inserted " << rest.size() << " character(s) at " << n[0] << ":" << n[1] << ".\n";
     } else if (cmd == "nl") {
         takeWords(rest, 2, w, rest);
         needNumbers(w, 2, n, "nl <line> <col>");
-        doc.insertNewLine(userPos(doc, n[0], n[1]));
+        ed.insertNewLine(userPos(doc, n[0], n[1]));
         std::cout << "Line split at " << n[0] << ":" << n[1] << ".\n";
     } else if (cmd == "del") {
         requireNotEmpty(doc);
@@ -197,19 +274,19 @@ static bool execute(Document& doc, const std::string& input) {
         size_t count = 1;
         if (got >= 3 && (!parseNum(w[2], count) || count == 0))
             throw std::invalid_argument("Usage: del <line> <col> [count]   (count must be 1 or more)");
-        std::string gone = doc.deleteChars(userPos(doc, n[0], n[1]), count);
+        std::string gone = ed.deleteChars(userPos(doc, n[0], n[1]), count);
         std::cout << "Deleted \"" << preview(gone) << "\".\n";
     } else if (cmd == "delword") {
         requireNotEmpty(doc);
         takeWords(rest, 2, w, rest);
         needNumbers(w, 2, n, "delword <line> <col>");
-        std::string gone = doc.deleteWord(userPos(doc, n[0], n[1]));
+        std::string gone = ed.deleteWord(userPos(doc, n[0], n[1]));
         std::cout << "Deleted word \"" << preview(gone) << "\".\n";
     } else if (cmd == "delrange") {
         requireNotEmpty(doc);
         takeWords(rest, 4, w, rest);
         needNumbers(w, 4, n, "delrange <l1> <c1> <l2> <c2>");
-        std::string gone = doc.deleteRange(userPos(doc, n[0], n[1]), userPos(doc, n[2], n[3]));
+        std::string gone = ed.deleteRange(userPos(doc, n[0], n[1]), userPos(doc, n[2], n[3]));
         std::cout << "Deleted " << gone.size() << " character(s): \"" << preview(gone) << "\".\n";
     } else if (cmd == "dellines") {
         requireNotEmpty(doc);
@@ -220,8 +297,91 @@ static bool execute(Document& doc, const std::string& input) {
         if (from < 1 || to < from || to > doc.lineCount())
             throw std::out_of_range("Line range " + std::to_string(from) + "-" + std::to_string(to) +
                                     " is not valid (the document has " + std::to_string(doc.lineCount()) + " line(s)).");
-        doc.deleteLines(from - 1, to - 1);
+        ed.deleteLines(from - 1, to - 1);
         std::cout << "Deleted line(s) " << from << (to > from ? "-" + std::to_string(to) : std::string()) << ".\n";
+    } else if (cmd == "replace") {
+        requireNotEmpty(doc);
+        takeWords(rest, 4, w, rest);
+        needNumbers(w, 4, n, "replace <l1> <c1> <l2> <c2> <text>");
+        Pos a = userPos(doc, n[0], n[1]);
+        Pos b = userPos(doc, n[2], n[3]);
+        std::string before = doc.getRange(a, b);
+        ed.replaceRange(a, b, rest);
+        std::cout << "Replaced \"" << preview(before) << "\" with \"" << preview(rest) << "\".\n";
+    } else if (cmd == "find") {
+        requireNotEmpty(doc, "search");
+        SearchOptions opt;
+        size_t i = 0;
+        takeFlags(rest, i, opt);
+        std::string what;
+        while (i < rest.size() && isBlank(rest[i])) ++i;
+        if (i < rest.size() && rest[i] == '"') {                 // quoted: exact text, spaces kept
+            if (!takeArg(rest, i, what)) what.clear();
+            while (i < rest.size() && isBlank(rest[i])) ++i;
+            if (i < rest.size()) throw std::invalid_argument("Unexpected text after the closing quote.");
+        } else {
+            what = rest.substr(i);                                // the whole rest of the line
+        }
+        if (what.empty()) throw std::invalid_argument("Usage: find [-i] [-w] <text>   (the search text is empty)");
+        DynArray<Match> hits = findAll(doc, what, opt);
+        if (hits.empty()) {
+            std::cout << "\"" << preview(what) << "\" was not found (" << describe(opt) << ").\n";
+        } else {
+            std::cout << "Found " << hits.size() << " occurrence(s) of \"" << preview(what) << "\" ("
+                      << describe(opt) << "):\n";
+            const size_t shown = hits.size() < 50 ? hits.size() : 50;
+            for (size_t k = 0; k < shown; ++k) {
+                std::cout << "  " << (k + 1) << ")  " << (hits[k].start.line + 1) << ":" << (hits[k].start.col + 1)
+                          << "  | " << preview(doc.getLine(hits[k].start.line)) << "\n";
+            }
+            if (hits.size() > shown) std::cout << "  ... and " << (hits.size() - shown) << " more.\n";
+        }
+    } else if (cmd == "replaceall" || cmd == "replacenth") {
+        const bool nth = (cmd == "replacenth");
+        const char* usage = nth ? "replacenth [-i] [-w] <n> <old> <new>" : "replaceall [-i] [-w] <old> <new>";
+        requireNotEmpty(doc, "replace");
+        SearchOptions opt;
+        size_t i = 0;
+        takeFlags(rest, i, opt);
+        std::string a, b;
+        size_t which = 0;
+        if (nth) {
+            std::string num;
+            if (!takeArg(rest, i, num) || !parseNum(num, which) || which == 0)
+                throw std::invalid_argument(std::string("Usage: ") + usage + "   (n must be 1 or more)");
+        }
+        if (!takeArg(rest, i, a)) throw std::invalid_argument(std::string("Usage: ") + usage);
+        if (!takeArg(rest, i, b)) throw std::invalid_argument(std::string("Usage: ") + usage +
+                                                              "   (use \"\" for an empty replacement)");
+        while (i < rest.size() && isBlank(rest[i])) ++i;
+        if (i < rest.size()) throw std::invalid_argument(std::string("Too many arguments. Usage: ") + usage +
+                                                         "   (put text with spaces in \"quotes\")");
+        if (a.empty()) throw std::invalid_argument("The search text is empty.");
+        if (nth) {
+            Match m = ed.replaceNth(a, b, which, opt);
+            std::cout << "Replaced occurrence " << which << " (at " << (m.start.line + 1) << ":" << (m.start.col + 1)
+                      << ") with \"" << preview(b) << "\".\n";
+        } else {
+            ReplaceResult r = ed.replaceAll(a, b, opt);
+            if (r.found == 0) std::cout << "\"" << preview(a) << "\" was not found; nothing changed.\n";
+            else if (r.changed == 0) std::cout << "Found " << r.found << " occurrence(s), but they already equal the replacement; nothing changed.\n";
+            else std::cout << "Replaced " << r.changed << " occurrence(s) of \"" << preview(a) << "\" with \""
+                           << preview(b) << "\". One 'undo' reverses all of them.\n";
+        }
+    } else if (cmd == "undo") {
+        std::string label;
+        if (ed.undo(&label)) std::cout << "Undid: " << label << ".\n";
+        else std::cout << "Nothing to undo.\n";
+    } else if (cmd == "redo") {
+        std::string label;
+        if (ed.redo(&label)) std::cout << "Redid: " << label << ".\n";
+        else std::cout << "Nothing to redo.\n";
+    } else if (cmd == "history") {
+        std::cout << "Can undo " << ed.undoCount() << " step(s)";
+        if (ed.canUndo()) std::cout << " (next: " << ed.nextUndoLabel() << ")";
+        std::cout << "; can redo " << ed.redoCount() << " step(s)";
+        if (ed.canRedo()) std::cout << " (next: " << ed.nextRedoLabel() << ")";
+        std::cout << ". History keeps the latest " << ed.historyLimit() << " steps.\n";
     } else {
         std::cout << "Unknown command '" << cmd << "'. Type 'help' for the list.\n";
     }
@@ -229,14 +389,14 @@ static bool execute(Document& doc, const std::string& input) {
 }
 
 int main() {
-    Document doc;
+    Editor ed;
     std::cout << "Text Editor (console)  -  type 'help' for commands.\n";
     std::string input;
     while (true) {
-        std::cout << (doc.modified() ? "*" : "") << "> " << std::flush;
+        std::cout << (ed.doc().modified() ? "*" : "") << "> " << std::flush;
         if (!std::getline(std::cin, input)) break;  // end of input
         try {
-            if (!execute(doc, input)) break;
+            if (!execute(ed, input)) break;
         } catch (const std::exception& e) {
             std::cout << "Error: " << e.what() << "\n";
         }

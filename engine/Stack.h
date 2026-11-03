@@ -27,6 +27,12 @@ public:
         return items_[items_.size() - 1];
     }
 
+    // Keep only the newest 'maxSize' items, dropping the oldest from the bottom.
+    // Used to cap the undo history. O(size) but only runs when the cap is hit.
+    void trim(size_t maxSize) {
+        if (items_.size() > maxSize) items_.erase(0, items_.size() - maxSize);
+    }
+
     bool empty() const { return items_.empty(); }
     size_t size() const { return items_.size(); }
     void clear() { items_.clear(); }

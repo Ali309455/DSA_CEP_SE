@@ -69,6 +69,8 @@ public:
     std::string deleteChars(Pos at, size_t count);          // within one line, clamped to its end
     std::string deleteWord(Pos at);                         // the word containing 'at'
     std::string deleteLines(size_t from, size_t to);        // inclusive range of whole lines
+    // The start and end of the word containing 'at' (what deleteWord removes).
+    void wordRange(Pos at, Pos& a, Pos& b) const;
     // Positions that cover whole lines [from, to] (what deleteLines removes).
     void lineSpan(size_t from, size_t to, Pos& a, Pos& b) const;
 

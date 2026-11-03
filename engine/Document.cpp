@@ -221,7 +221,7 @@ std::string Document::deleteChars(Pos at, size_t count) {
     return deleteRange(at, Pos{at.line, endCol});
 }
 
-std::string Document::deleteWord(Pos at) {
+void Document::wordRange(Pos at, Pos& a, Pos& b) const {
     checkPos(at);
     Node* n = nodeAt(at.line);
     if (at.col >= n->text.size()) throw std::out_of_range("there is no character at that position");
@@ -230,7 +230,14 @@ std::string Document::deleteWord(Pos at) {
     size_t r = at.col;
     while (l > 0 && isWordChar(n->text[l - 1])) --l;
     while (r < n->text.size() && isWordChar(n->text[r])) ++r;
-    return deleteRange(Pos{at.line, l}, Pos{at.line, r});
+    a = Pos{at.line, l};
+    b = Pos{at.line, r};
+}
+
+std::string Document::deleteWord(Pos at) {
+    Pos a, b;
+    wordRange(at, a, b);
+    return deleteRange(a, b);
 }
 
 void Document::lineSpan(size_t from, size_t to, Pos& a, Pos& b) const {

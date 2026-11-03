@@ -16,7 +16,9 @@ endif()
 # ---- Engine: all the data structures and algorithms. No GUI code in here. ----
 add_library(engine STATIC
   engine/Document.cpp
-  engine/FileIO.cpp)
+  engine/Editor.cpp
+  engine/FileIO.cpp
+  engine/Search.cpp)
 target_include_directories(engine PUBLIC engine)
 
 # ---- Console test suite (use its output as evidence in the report) ----
