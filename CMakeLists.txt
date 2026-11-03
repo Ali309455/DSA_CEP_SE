@@ -15,10 +15,13 @@ endif()
 
 # ---- Engine: all the data structures and algorithms. No GUI code in here. ----
 add_library(engine STATIC
+  engine/Assist.cpp
+  engine/Brackets.cpp
   engine/Document.cpp
   engine/Editor.cpp
   engine/FileIO.cpp
-  engine/Search.cpp)
+  engine/Search.cpp
+  engine/Trie.cpp)
 target_include_directories(engine PUBLIC engine)
 
 # ---- Console test suite (use its output as evidence in the report) ----
@@ -38,4 +41,5 @@ endif()
 enable_testing()
 add_test(NAME engine_tests COMMAND engine_tests)
 
+# Snippets (hash table) are in next_part_snippets/ and join the build in part 4b.
 # The GUI (Dear ImGui + GLFW) is added in a later phase.

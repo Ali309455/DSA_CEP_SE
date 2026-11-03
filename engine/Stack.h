@@ -27,6 +27,13 @@ public:
         return items_[items_.size() - 1];
     }
 
+    // Look at an item without removing it. depthFromTop 0 is the top (same as top()),
+    // 1 is the one below it, ... Throws std::out_of_range if there is no such item. O(1).
+    const T& peek(size_t depthFromTop) const {
+        if (depthFromTop >= items_.size()) throw std::out_of_range("Stack::peek beyond the bottom of the stack");
+        return items_[items_.size() - 1 - depthFromTop];
+    }
+
     // Keep only the newest 'maxSize' items, dropping the oldest from the bottom.
     // Used to cap the undo history. O(size) but only runs when the cap is hit.
     void trim(size_t maxSize) {

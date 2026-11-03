@@ -1,4 +1,4 @@
-// console_main.cpp - a command-line front end for the engine (phases 1-3).
+// console_main.cpp - a command-line front end for the engine (phases 1-4).
 // Lines and columns are 1-based here (as a user would count them).
 
 #include <cerrno>
@@ -6,6 +6,8 @@
 #include <iostream>
 #include <string>
 
+#include "Assist.h"
+#include "Brackets.h"
 #include "DynArray.h"
 #include "Document.h"
 #include "Editor.h"
@@ -48,6 +50,14 @@ static void printHelp() {
         "      -i ignore upper/lower case     -w whole words only\n"
         "      Put text in \"double quotes\" if it has spaces or is empty (\"\"); inside quotes\n"
         "      \\n is a line break, \\t a tab, \\\" a quote, \\\\ a backslash.\n"
+        "  Code help (phase 4):\n"
+        "    brackets                    check ( ) [ ] { } in the document (ignores strings and comments)\n"
+        "    match <line> <col>          show the partner of the bracket at / just before a position\n"
+        "    complete <prefix>           suggest words (C++ keywords + words in this document)\n"
+        "    complete <line> <col>       suggest for the word just before a position\n"
+        "    accept <line> <col> <word>  finish the word before a position with <word> (one undo step)\n"
+        "    dictadd <word>              add a word to the autocomplete dictionary\n"
+        "    dictdel <word>              remove a word from the dictionary\n"
         "  help                          show this list\n";
 }
 
@@ -204,7 +214,7 @@ static std::string describe(const SearchOptions& o) {
 }
 
 // Returns false when the user wants to quit.
-static bool execute(Editor& ed, const std::string& input) {
+static bool execute(Editor& ed, Autocomplete& ac, const std::string& input) {
     const Document& doc = ed.doc();
     DynArray<std::string> w;
     std::string rest;
@@ -382,6 +392,61 @@ static bool execute(Editor& ed, const std::string& input) {
         std::cout << "; can redo " << ed.redoCount() << " step(s)";
         if (ed.canRedo()) std::cout << " (next: " << ed.nextRedoLabel() << ")";
         std::cout << ". History keeps the latest " << ed.historyLimit() << " steps.\n";
+    } else if (cmd == "brackets") {
+        BracketReport r = checkBrackets(doc);
+        if (r.ok()) {
+            std::cout << "Brackets OK: " << r.pairs.size() << " pair(s), deepest nesting " << r.maxDepth << ".\n";
+        } else {
+            std::cout << r.issues.size() << " problem(s) found" << (r.truncated ? " (list cut short)" : "") << ":\n";
+            for (size_t k = 0; k < r.issues.size(); ++k) std::cout << "  " << r.issues[k].message << "\n";
+        }
+    } else if (cmd == "match") {
+        takeWords(rest, 2, w, rest);
+        needNumbers(w, 2, n, "match <line> <col>");
+        Pos at = userPos(doc, n[0], n[1]);
+        BracketReport r = checkBrackets(doc);
+        Pos b, o;
+        if (matchNearCursor(doc, r, at, b, o))
+            std::cout << "'" << doc.getLine(b.line)[b.col] << "' at " << (b.line + 1) << ":" << (b.col + 1)
+                      << " pairs with '" << doc.getLine(o.line)[o.col] << "' at " << (o.line + 1) << ":" << (o.col + 1) << ".\n";
+        else
+            std::cout << "No matched bracket at or just before " << n[0] << ":" << n[1] << ".\n";
+    } else if (cmd == "complete") {
+        size_t got = takeWords(rest, 3, w, rest);
+        ac.refresh(doc);
+        DynArray<std::string> sug;
+        std::string pre;
+        if (got == 2 && parseNum(w[0], n[0]) && parseNum(w[1], n[1])) {
+            Pos at = userPos(doc, n[0], n[1]);
+            pre = prefixBefore(doc, at);
+            sug = ac.suggest(pre, 8);
+        } else if (got == 1 && rest.empty()) {
+            pre = w[0];
+            sug = ac.suggest(pre, 8);
+        } else {
+            throw std::invalid_argument("Usage: complete <prefix>   or   complete <line> <col>");
+        }
+        if (pre.empty()) throw std::invalid_argument("There is no word before that position to complete.");
+        if (!Trie::validWord(pre)) throw std::invalid_argument("'" + pre + "' cannot be completed (too long or has blanks).");
+        if (sug.empty()) std::cout << "No suggestions for \"" << pre << "\".\n";
+        else {
+            std::cout << "Suggestions for \"" << pre << "\":\n";
+            for (size_t k = 0; k < sug.size(); ++k) std::cout << "  " << (k + 1) << ") " << sug[k] << "\n";
+        }
+    } else if (cmd == "accept") {
+        takeWords(rest, 2, w, rest);
+        needNumbers(w, 2, n, "accept <line> <col> <word>");
+        if (rest.empty()) throw std::invalid_argument("Usage: accept <line> <col> <word>");
+        Pos at = userPos(doc, n[0], n[1]);
+        Pos end = applyCompletion(ed, at, rest);
+        ac.accepted(rest);
+        std::cout << "Completed to \"" << rest << "\"; cursor now at " << (end.line + 1) << ":" << (end.col + 1) << ".\n";
+    } else if (cmd == "dictadd") {
+        if (!ac.addWord(rest)) throw std::invalid_argument("'" + preview(rest) + "' is not a valid word (1-" + std::to_string(Trie::kMaxWordLength) + " characters, no blanks).");
+        std::cout << "Added \"" << rest << "\" to the dictionary (" << ac.dictionarySize() << " words).\n";
+    } else if (cmd == "dictdel") {
+        if (!ac.removeWord(rest)) throw std::invalid_argument("\"" + preview(rest) + "\" is not in the dictionary.");
+        std::cout << "Removed \"" << rest << "\" (" << ac.dictionarySize() << " words left).\n";
     } else {
         std::cout << "Unknown command '" << cmd << "'. Type 'help' for the list.\n";
     }
@@ -390,13 +455,14 @@ static bool execute(Editor& ed, const std::string& input) {
 
 int main() {
     Editor ed;
+    Autocomplete ac;
     std::cout << "Text Editor (console)  -  type 'help' for commands.\n";
     std::string input;
     while (true) {
         std::cout << (ed.doc().modified() ? "*" : "") << "> " << std::flush;
         if (!std::getline(std::cin, input)) break;  // end of input
         try {
-            if (!execute(ed, input)) break;
+            if (!execute(ed, ac, input)) break;
         } catch (const std::exception& e) {
             std::cout << "Error: " << e.what() << "\n";
         }

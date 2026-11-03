@@ -7,6 +7,11 @@
 #include <iostream>
 #include <string>
 
+#include <map>
+#include <vector>
+#include "Assist.h"
+#include "Brackets.h"
+#include "Trie.h"
 #include "DynArray.h"
 #include "Document.h"
 #include "Editor.h"
@@ -1094,6 +1099,431 @@ static void testReplaceLarge() {
     CHECK(e.doc().checkInvariants());
 }
 
+// ------------------------------------------------------------------ phase 4
+
+static BracketReport brk(const std::string& src, const BracketOptions& o = BracketOptions()) {
+    Document d;
+    d.loadFromString(src);
+    return checkBrackets(d, o);
+}
+
+static void testStackPeek() {
+    section("Stack::peek");
+    Stack<int> s;
+    CHECK_THROWS(s.peek(0));
+    s.push(1); s.push(2); s.push(3);
+    CHECK(s.peek(0) == 3 && s.peek(1) == 2 && s.peek(2) == 1);
+    CHECK_THROWS(s.peek(3));
+    CHECK(s.size() == 3);     // peek does not remove
+}
+
+static void testBracketsBasic() {
+    section("Brackets: basic");
+    BracketReport r = brk("");
+    CHECK(r.ok() && r.pairs.empty() && r.maxDepth == 0);
+    r = brk("int main() { return f(a[1]); }\n");
+    CHECK(r.ok());
+    CHECK(r.pairs.size() == 4);      // main(), { }, f( ), [ ]
+    CHECK(r.maxDepth == 3);
+    r = brk("(");
+    CHECK(!r.ok() && r.issues.size() == 1 && r.issues[0].kind == BracketIssueKind::Unclosed);
+    CHECK(r.issues[0].pos == (Pos{0, 0}) && r.issues[0].expected == ')');
+    r = brk(")");
+    CHECK(r.issues.size() == 1 && r.issues[0].kind == BracketIssueKind::UnmatchedClose && r.issues[0].found == ')');
+    r = brk("(]");
+    CHECK(r.issues.size() == 1 && r.issues[0].kind == BracketIssueKind::Mismatch);
+    CHECK(r.issues[0].pos == (Pos{0, 1}) && r.issues[0].related == (Pos{0, 0}) && r.issues[0].expected == ')');
+    CHECK(r.pairs.empty());
+    // message uses 1-based line:column
+    r = brk("a\n  )");
+    CHECK(r.issues.size() == 1 && r.issues[0].message.find("2:3") != std::string::npos);
+    // pairs: depth and ordering
+    r = brk("{ ( ) }");
+    CHECK(r.pairs.size() == 2 && r.pairs[0].type == '(' && r.pairs[0].depth == 1 && r.pairs[1].type == '{' && r.pairs[1].depth == 0);
+    // pair across lines
+    r = brk("{\n\n}");
+    CHECK(r.ok() && r.pairs.size() == 1 && r.pairs[0].open == (Pos{0, 0}) && r.pairs[0].close == (Pos{2, 0}));
+    // other characters (angle brackets, text) are ignored
+    r = brk("template<typename T> a < b > c");
+    CHECK(r.ok() && r.pairs.empty());
+}
+
+static void testBracketsRecovery() {
+    section("Brackets: one typo, one message");
+    BracketReport r = brk("{ ( }");               // '(' never closed, '}' still pairs with '{'
+    CHECK(r.issues.size() == 1 && r.issues[0].kind == BracketIssueKind::Unclosed && r.issues[0].found == '(');
+    CHECK(r.pairs.size() == 1 && r.pairs[0].type == '{');
+    r = brk("( ) )");
+    CHECK(r.issues.size() == 1 && r.issues[0].kind == BracketIssueKind::UnmatchedClose && r.issues[0].pos == (Pos{0, 4}));
+    r = brk("{ [ ( ] }");                          // wrong closer: ']' matches '[' below '(' -> '(' unclosed
+    CHECK(r.issues.size() == 1 && r.issues[0].found == '(' && r.pairs.size() == 2);
+    r = brk("( [ { ");                            // all three unclosed, listed in text order
+    CHECK(r.issues.size() == 3 && r.issues[0].found == '(' && r.issues[2].found == '{');
+    r = brk("(}");                                // matches nothing below: wrong-kind typo, '(' consumed
+    CHECK(r.issues.size() == 1 && r.issues[0].kind == BracketIssueKind::Mismatch);
+}
+
+static void testBracketsIgnored() {
+    section("Brackets: strings, comments, literals");
+    CHECK(brk("s = \")\";").ok());
+    CHECK(brk("s = \"\\\"(\";").ok());                    // escaped quote
+    CHECK(brk("c = ')'; d = '(';").ok());
+    CHECK(brk("c = '\\'' ; ( )").ok());                  // escaped quote in char literal
+    CHECK(brk("// ) ] }\nx();").ok());
+    CHECK(brk("x(); // :-)").ok());
+    CHECK(brk("/* ( [ { */ y();").ok());
+    CHECK(brk("/* a\n ( \n b */ ()").ok());              // multi-line block comment
+    CHECK(brk("/*/ ( */ ()").ok());                      // '/*/' does not close itself
+    CHECK(brk("// one \\\n ( continued\nz();").ok());     // backslash continues a line comment
+    CHECK(!brk("// one\n ( not continued").ok());
+    CHECK(brk("a = 1'000'000; ( )").ok());               // digit separators are not char literals
+    CHECK(brk("a = 0xFF'FF; ( )").ok());
+    CHECK(brk("auto s = R\"(a ) b ( c)\"; ( )").ok());     // raw string
+    CHECK(brk("auto s = R\"x(a )\" ) b)x\"; ( )").ok());   // raw string with delimiter
+    CHECK(brk("auto s = R\"(line1 (\nline2 ))\"; ()").ok());// raw string over lines
+    CHECK(brk("#error don't ( break").ok());                 // stray apostrophe: rest of that line is skipped, never an error
+}
+
+static void testBracketsIssuesKinds() {
+    section("Brackets: unterminated things, options");
+    BracketReport r = brk("a /* never ends ( \n b");
+    CHECK(r.issues.size() == 1 && r.issues[0].kind == BracketIssueKind::UnterminatedComment && r.issues[0].pos == (Pos{0, 2}));
+    r = brk("s = \"abc;\n(");
+    CHECK(r.issues.size() == 2 && r.issues[0].kind == BracketIssueKind::UnterminatedString);   // + '(' unclosed
+    r = brk("R\"(never ends\n ( ");
+    CHECK(r.issues.size() == 1 && r.issues[0].kind == BracketIssueKind::UnterminatedString);
+    BracketOptions o;
+    o.skipStrings = false;
+    CHECK(!brk("s = \")\";", o).ok());
+    o = BracketOptions();
+    o.skipComments = false;
+    CHECK(!brk("// )", o).ok());
+    // issue cap
+    o = BracketOptions();
+    o.maxIssues = 3;
+    r = brk(")))))))", o);
+    CHECK(r.issues.size() == 3 && r.truncated);
+    o.maxIssues = 0;
+    r = brk(")))))))", o);
+    CHECK(r.issues.size() == 7 && !r.truncated);
+}
+
+static void testBracketsCursor() {
+    section("Brackets: matching near the cursor");
+    Document d;
+    d.loadFromString("f(a[1]);\n{ }");
+    BracketReport r = checkBrackets(d);
+    Pos b, o;
+    CHECK(matchNearCursor(d, r, Pos{0, 1}, b, o) && b == (Pos{0, 1}) && o == (Pos{0, 6}));   // on '('
+    CHECK(matchNearCursor(d, r, Pos{0, 7}, b, o) && b == (Pos{0, 6}) && o == (Pos{0, 1}));   // just after ')'
+    CHECK(!matchNearCursor(d, r, Pos{0, 0}, b, o));                                            // before 'f', none
+    CHECK(!matchNearCursor(d, r, Pos{0, 3}, b, o) || b == (Pos{0, 3}));                         // 'a' / '[' neighbour
+    CHECK(matchNearCursor(d, r, Pos{1, 2}, b, o) && !(b == (Pos{1, 0})));                // after ' ' -> next is '}'
+    CHECK(matchNearCursor(d, r, Pos{1, 3}, b, o) && o == (Pos{1, 0}));                         // end of line, after '}'
+    Pos tmp;
+    CHECK(r.matchOf(Pos{1, 0}, tmp) && tmp == (Pos{1, 2}));
+    CHECK(!r.matchOf(Pos{0, 0}, tmp));
+    CHECK_THROWS(matchNearCursor(d, r, Pos{5, 0}, b, o));
+    CHECK_THROWS(matchNearCursor(d, r, Pos{0, 99}, b, o));
+    // an unmatched bracket has no partner
+    d.loadFromString("(");
+    r = checkBrackets(d);
+    CHECK(!matchNearCursor(d, r, Pos{0, 0}, b, o) && !matchNearCursor(d, r, Pos{0, 1}, b, o));
+    CHECK(bracketPartner('(') == ')' && bracketPartner('}') == '{' && bracketPartner('x') == 0);
+}
+
+static void testBracketsRandom() {
+    section("Brackets: random vs simple model, and fuzz");
+    unsigned seed = 12345;
+    auto rnd = [&seed]() { seed = seed * 1664525u + 1013904223u; return seed >> 8; };
+    const char open[] = "([{", close[] = ")]}";
+    for (int iter = 0; iter < 400; ++iter) {
+        std::string src;
+        int len = rnd() % 40;
+        for (int i = 0; i < len; ++i) {
+            unsigned k = rnd() % 8;
+            if (k < 3) src.push_back(open[k]);
+            else if (k < 6) src.push_back(close[k - 3]);
+            else if (k == 6) src.push_back('\n');
+            else src.push_back('x');
+        }
+        // model: textbook balanced check
+        std::vector<char> st;
+        bool balanced = true;
+        for (size_t i = 0; i < src.size() && balanced; ++i) {
+            char c = src[i];
+            if (c == '(' || c == '[' || c == '{') st.push_back(c);
+            else if (c == ')' || c == ']' || c == '}') {
+                if (st.empty() || bracketPartner(st.back()) != c) balanced = false;
+                else st.pop_back();
+            }
+        }
+        balanced = balanced && st.empty();
+        BracketReport r = brk(src);
+        CHECK(r.ok() == balanced);
+        if (balanced) {
+            size_t opens = 0;
+            for (size_t i = 0; i < src.size(); ++i) if (isOpenBracket(src[i])) ++opens;
+            CHECK(r.pairs.size() == opens);
+        }
+        for (size_t i = 0; i < r.pairs.size(); ++i)
+            CHECK(r.pairs[i].open < r.pairs[i].close);
+    }
+    // fuzz with quotes, slashes, stars, backslashes, newlines: never crashes, issues are sane
+    const char alphabet[] = "()[]{}\"'/*\\\nR a1_#";
+    for (int iter = 0; iter < 600; ++iter) {
+        std::string src;
+        int len = rnd() % 60;
+        for (int i = 0; i < len; ++i) src.push_back(alphabet[rnd() % (sizeof(alphabet) - 1)]);
+        BracketReport r = brk(src);
+        for (size_t i = 0; i < r.issues.size(); ++i) CHECK(!r.issues[i].message.empty());
+        for (size_t i = 0; i < r.pairs.size(); ++i)
+            CHECK(r.pairs[i].open < r.pairs[i].close && bracketPartner(r.pairs[i].type) != 0);
+    }
+}
+
+static void testBracketsLarge() {
+    section("Brackets: large input");
+    std::string src;
+    for (int i = 0; i < 200000; ++i) src += "(";
+    for (int i = 0; i < 200000; ++i) src += ")";
+    src += "\n";
+    BracketReport r = brk(src);                           // very deep nesting: no recursion, no overflow
+    CHECK(r.ok() && r.pairs.size() == 200000 && r.maxDepth == 200000);
+    std::string big;
+    for (int i = 0; i < 100000; ++i) big += "void f" + std::to_string(i) + "() { if (a[1]) { } }\n";
+    r = brk(big);
+    CHECK(r.ok() && r.pairs.size() == 500000);
+}
+
+static void testTrieBasics() {
+    section("Trie: basics");
+    Trie t;
+    CHECK(t.wordCount() == 0 && !t.contains("a") && t.weightOf("a") == 0);
+    CHECK(t.insert("car") && t.insert("card") && t.insert("care") && t.insert("cat") && t.insert("dog"));
+    CHECK(t.wordCount() == 5);
+    CHECK(t.contains("car") && t.contains("card") && !t.contains("ca") && !t.contains("cards"));
+    CHECK(t.insert("car", 4) && t.weightOf("car") == 5 && t.wordCount() == 5);
+    DynArray<std::string> c = t.complete("ca", 10);
+    CHECK(c.size() == 4 && c[0] == "car" && c[1] == "card" && c[2] == "care" && c[3] == "cat");   // weight, then alphabetical
+    c = t.complete("ca", 2);
+    CHECK(c.size() == 2 && c[0] == "car" && c[1] == "card");
+    CHECK(t.complete("car", 10).size() == 3);            // prefix itself included
+    CHECK(t.complete("x", 5).empty() && t.complete("ca", 0).empty() && t.complete("", 5).empty());
+    CHECK(t.countWithPrefix("ca") == 4 && t.countWithPrefix("") == 0 && t.countWithPrefix("zz") == 0);
+    CHECK(t.remove("card") && !t.contains("card") && t.contains("care") && t.wordCount() == 4);
+    CHECK(!t.remove("card") && !t.remove("zzz") && !t.remove(""));
+    CHECK(t.complete("car", 10).size() == 2);
+    DynArray<std::string> top = t.topWords(2);
+    CHECK(top.size() == 2 && top[0] == "car");
+    CHECK(t.topWords(0).empty());
+    size_t before = t.nodeCount();
+    t.compact();
+    CHECK(t.nodeCount() < before && t.wordCount() == 4 && t.weightOf("car") == 5 && t.contains("dog"));
+    t.clear();
+    CHECK(t.wordCount() == 0 && t.nodeCount() == 1 && t.complete("c", 5).empty());
+}
+
+static void testTrieErrors() {
+    section("Trie: invalid input never throws or changes the trie");
+    Trie t;
+    CHECK(!t.insert("") && !t.insert("a b") && !t.insert("tab\t") && !t.insert("nl\n") && !t.insert(std::string("a\0b", 3)));
+    CHECK(!t.insert(std::string(Trie::kMaxWordLength + 1, 'a')));
+    CHECK(t.insert(std::string(Trie::kMaxWordLength, 'a')));
+    CHECK(t.wordCount() == 1);
+    CHECK(!t.contains("") && t.weightOf("") == 0 && t.complete("a b", 5).empty() && t.countWithPrefix("a b") == 0);
+    CHECK(t.insert("caf\xc3\xa9"));                       // UTF-8 bytes allowed
+    CHECK(t.contains("caf\xc3\xa9"));
+    CHECK(t.insert("Hello") && t.insert("hello") && t.wordCount() == 4);   // case sensitive
+    CHECK(t.insert("big", 0xFFFFFFFFu) && t.insert("big", 5) && t.weightOf("big") == 0xFFFFFFFFu);   // saturates
+}
+
+static void testTrieRandom() {
+    section("Trie: random vs std::map model");
+    unsigned seed = 777;
+    auto rnd = [&seed]() { seed = seed * 1664525u + 1013904223u; return seed >> 8; };
+    Trie t;
+    std::map<std::string, unsigned> model;
+    for (int step = 0; step < 6000; ++step) {
+        std::string w;
+        int len = 1 + rnd() % 4;
+        for (int i = 0; i < len; ++i) w.push_back(static_cast<char>('a' + rnd() % 3));
+        unsigned op = rnd() % 10;
+        if (op < 6) { unsigned wt = rnd() % 4; t.insert(w, wt); model[w] += wt; }
+        else if (op < 8) { bool had = model.erase(w) > 0; CHECK(t.remove(w) == had); }
+        else if (op == 8) t.compact();
+        else {
+            std::string pre = w.substr(0, 1 + rnd() % w.size());
+            size_t k = 1 + rnd() % 6;
+            // model answer: all words with prefix, weight desc then alphabetical, first k
+            std::vector<std::pair<std::string, unsigned>> all;
+            for (std::map<std::string, unsigned>::const_iterator it = model.begin(); it != model.end(); ++it)
+                if (it->first.compare(0, pre.size(), pre) == 0) all.push_back(*it);
+            for (size_t i = 0; i < all.size(); ++i)                // selection sort, stable enough: (weight desc, word asc)
+                for (size_t j = i + 1; j < all.size(); ++j)
+                    if (all[j].second > all[i].second || (all[j].second == all[i].second && all[j].first < all[i].first)) std::swap(all[i], all[j]);
+            DynArray<std::string> got = t.complete(pre, k);
+            size_t expect = all.size() < k ? all.size() : k;
+            CHECK(got.size() == expect);
+            for (size_t i = 0; i < got.size() && i < expect; ++i) CHECK(got[i] == all[i].first);
+            CHECK(t.countWithPrefix(pre) == all.size());
+        }
+    }
+    CHECK(t.wordCount() == model.size());
+}
+
+static void testTrieLarge() {
+    section("Trie: large");
+    Trie t;
+    unsigned seed = 99;
+    auto rnd = [&seed]() { seed = seed * 1664525u + 1013904223u; return seed >> 8; };
+    for (int i = 0; i < 200000; ++i) {
+        std::string w;
+        int len = 3 + rnd() % 10;
+        for (int k = 0; k < len; ++k) w.push_back(static_cast<char>('a' + rnd() % 26));
+        t.insert(w);
+    }
+    CHECK(t.wordCount() > 190000);
+    CHECK(t.complete("ab", 8).size() == 8);
+    CHECK(t.complete("q", 5).size() == 5);
+    CHECK(t.countWithPrefix("a") > 5000);
+}
+
+static Document* mkdoc(Document& d, const std::string& s) { d.loadFromString(s); return &d; }
+
+static void testAssist() {
+    section("Assist: prefix, dictionary, suggestions");
+    Document d;
+    mkdoc(d, "int counter = 0;\ncounter++; counter += cou;\nint x9 = 5; 3rd 0x1F\n");
+    Pos start;
+    CHECK(prefixBefore(d, Pos{1, 0}) == "");
+    CHECK(prefixBefore(d, Pos{0, 11}, &start) == "counter" && start == (Pos{0, 4}));
+    CHECK(prefixBefore(d, Pos{0, 4}) == "");                           // after a space
+    CHECK(prefixBefore(d, Pos{0, 3}) == "int");
+    CHECK_THROWS(prefixBefore(d, Pos{9, 0}));
+    CHECK_THROWS(prefixBefore(d, Pos{0, 99}));
+
+    Autocomplete ac;
+    CHECK(ac.dictionarySize() > 100);
+    ac.refresh(d);
+    CHECK(ac.documentWordCount() > 0);
+    ac.refresh(d);                                   // twice: counts must not inflate
+    CHECK(ac.suggest("cou", 5).size() >= 1 && ac.suggest("cou", 5)[0] == "counter");
+    CHECK(ac.suggest("counter", 5).empty());          // only itself
+    CHECK(ac.suggest("", 5).empty() && ac.suggest("a b", 5).empty() && ac.suggest("zzzq", 5).empty());
+    CHECK(ac.suggest("c", 0).empty());
+    CHECK(ac.suggest("c", 3).size() == 3);
+    CHECK(ac.suggest("3", 5).empty() && ac.suggest("0x", 5).empty());   // numbers are not words
+    CHECK(ac.suggest("x", 5).size() >= 1);            // "x9" (a 2-char word) is found from the document
+    DynArray<std::string> s = ac.suggestAt(d, Pos{1, 25}, 5);   // after "cou" on line 2
+    CHECK(s.size() >= 1 && s[0] == "counter");
+    // accepting raises rank
+    CHECK(ac.suggest("st", 3).size() == 3);
+    DynArray<std::string> before = ac.suggest("st", 20);
+    ac.accepted("struct");
+    CHECK(ac.suggest("st", 20)[0] == "struct");
+    // user dictionary
+    CHECK(ac.addWord("my_helper") && !ac.addWord("") && !ac.addWord("a b"));
+    CHECK(ac.suggest("my_h", 3).size() == 1);
+    CHECK(ac.removeWord("my_helper") && !ac.removeWord("my_helper") && ac.suggest("my_h", 3).empty());
+}
+
+static void testAssistRankingThreshold() {
+    section("Assist: ranking is exact even when a word is mid-ranked in both tries");
+    Autocomplete ac;
+    // 10 dictionary words with big dictionary weight, 10 with big document weight, and one
+    // word that is only 'medium' in each list but best in total.
+    for (int i = 0; i < 10; ++i) {
+        std::string a = "zqa" + std::string(1, static_cast<char>('a' + i));
+        std::string b = "zqb" + std::string(1, static_cast<char>('a' + i));
+        for (int k = 0; k < 60; ++k) ac.accepted(a);
+        (void)b;
+    }
+    Document d;
+    std::string text;
+    for (int i = 0; i < 10; ++i) {
+        std::string b = "zqb" + std::string(1, static_cast<char>('a' + i));
+        for (int k = 0; k < 60; ++k) text += b + " ";
+        text += "\n";
+    }
+    for (int k = 0; k < 50; ++k) { ac.accepted("zqmid"); text += "zqmid "; }
+    d.loadFromString(text);
+    ac.refresh(d);
+    DynArray<std::string> s = ac.suggest("zq", 3);
+    CHECK(s.size() == 3 && s[0] == "zqmid");           // 51+50 = 101 beats 60..61
+}
+
+static void testAssistRandomRanking() {
+    section("Assist: suggest() equals brute force");
+    unsigned seed = 4242;
+    auto rnd = [&seed]() { seed = seed * 1664525u + 1013904223u; return seed >> 8; };
+    for (int iter = 0; iter < 60; ++iter) {
+        Autocomplete ac;
+        std::map<std::string, unsigned long long> score;
+        std::string text;
+        for (int i = 0; i < 300; ++i) {
+            std::string w = "w";
+            int len = 1 + rnd() % 3;
+            for (int k = 0; k < len; ++k) w.push_back(static_cast<char>('a' + rnd() % 3));
+            if (rnd() % 2) { ac.accepted(w); score[w] += 1; }
+            else { text += w + " "; score[w] += 1; }
+        }
+        Document d;
+        d.loadFromString(text);
+        ac.refresh(d);
+        // dictionary words that were accepted get +1 on insert (weight 1 per accept), document +1 per use,
+        // so model score above is the exact sum of both.
+        for (int q = 0; q < 6; ++q) {
+            std::string pre = "w";
+            int pl = rnd() % 3;
+            for (int k = 0; k < pl; ++k) pre.push_back(static_cast<char>('a' + rnd() % 3));
+            size_t k = 1 + rnd() % 5;
+            std::vector<std::pair<std::string, unsigned long long>> all;
+            for (std::map<std::string, unsigned long long>::const_iterator it = score.begin(); it != score.end(); ++it)
+                if (it->first != pre && it->first.compare(0, pre.size(), pre) == 0 && it->first.size() >= 2) all.push_back(*it);
+            for (size_t i = 0; i < all.size(); ++i)
+                for (size_t j = i + 1; j < all.size(); ++j)
+                    if (all[j].second > all[i].second || (all[j].second == all[i].second && all[j].first < all[i].first)) std::swap(all[i], all[j]);
+            DynArray<std::string> got = ac.suggest(pre, k);
+            size_t expect = all.size() < k ? all.size() : k;
+            CHECK(got.size() == expect);
+            for (size_t i = 0; i < got.size() && i < expect; ++i) CHECK(got[i] == all[i].first);
+        }
+    }
+}
+
+static void testApplyCompletion() {
+    section("Assist: applyCompletion is one undo step");
+    Editor ed;
+    ed.insertText(Pos{0, 0}, "std::cou << x;");
+    size_t steps = ed.undoCount();
+    Pos end = applyCompletion(ed, Pos{0, 8}, "cout");
+    CHECK(ed.doc().getLine(0) == "std::cout << x;" && end == (Pos{0, 9}));
+    CHECK(ed.undoCount() == steps + 1 && ed.nextUndoLabel() == "autocomplete");
+    CHECK(ed.undo() && ed.doc().getLine(0) == "std::cou << x;");
+    CHECK(ed.redo() && ed.doc().getLine(0) == "std::cout << x;");
+    // nothing typed to complete -> word must start with the empty prefix: allowed (insert whole word)
+    ed.undo();
+    // errors change nothing and record nothing
+    steps = ed.undoCount();
+    std::string snapshot = ed.doc().getLine(0);
+    CHECK_THROWS(applyCompletion(ed, Pos{0, 8}, "printf"));        // does not start with 'cou'
+    CHECK_THROWS(applyCompletion(ed, Pos{0, 8}, "co"));            // shorter than the prefix
+    CHECK_THROWS(applyCompletion(ed, Pos{0, 8}, ""));
+    CHECK_THROWS(applyCompletion(ed, Pos{0, 8}, "a b"));
+    CHECK_THROWS(applyCompletion(ed, Pos{3, 0}, "cout"));
+    CHECK_THROWS(applyCompletion(ed, Pos{0, 99}, "cout"));
+    CHECK(ed.doc().getLine(0) == snapshot && ed.undoCount() == steps);
+    // already complete: no change, no history
+    CHECK(applyCompletion(ed, Pos{0, 8}, "cou") == (Pos{0, 8}) && ed.undoCount() == steps);
+    // empty document
+    Editor e2;
+    CHECK(applyCompletion(e2, Pos{0, 0}, "main") == (Pos{0, 4}) && e2.doc().getLine(0) == "main");
+    CHECK(e2.undo() && e2.doc().isEmpty());
+    CHECK(ed.doc().checkInvariants());
+}
+
+
 int main() {
     testDynArray();
     testStack();
@@ -1119,6 +1549,22 @@ int main() {
     testReplaceRollback();
     testReplaceRandom();
     testReplaceLarge();
+    testStackPeek();
+    testBracketsBasic();
+    testBracketsRecovery();
+    testBracketsIgnored();
+    testBracketsIssuesKinds();
+    testBracketsCursor();
+    testBracketsRandom();
+    testBracketsLarge();
+    testTrieBasics();
+    testTrieErrors();
+    testTrieRandom();
+    testTrieLarge();
+    testAssist();
+    testAssistRankingThreshold();
+    testAssistRandomRanking();
+    testApplyCompletion();
 
     std::cout << "\n" << (g_checks - g_failed) << "/" << g_checks << " checks passed";
     if (g_failed) std::cout << "  (" << g_failed << " FAILED)";
