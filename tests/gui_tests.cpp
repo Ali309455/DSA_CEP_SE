@@ -343,11 +343,11 @@ private slots:
         QVERIFY(!g.saveFile("", &err));
         // binary
         QFile b(dir.filePath("bin.dat"));
-        b.open(QIODevice::WriteOnly); b.write(QByteArray("ab\0cd", 5)); b.close();
+        QVERIFY(b.open(QIODevice::WriteOnly)); b.write(QByteArray("ab\0cd", 5)); b.close();
         QVERIFY(!g.openFile(b.fileName()).ok);
         // invalid UTF-8 needs confirmation, then opens with replacement characters
         QFile l(dir.filePath("latin.txt"));
-        l.open(QIODevice::WriteOnly); l.write("caf\xE9\n"); l.close();
+        QVERIFY(l.open(QIODevice::WriteOnly)); l.write("caf\xE9\n"); l.close();
         auto lr = g.openFile(l.fileName());
         QVERIFY(!lr.ok && lr.needsConfirm);
         lr = g.openFile(l.fileName(), true);
@@ -356,13 +356,13 @@ private slots:
         ok(g);
         // CRLF and BOM
         QFile c(dir.filePath("crlf.txt"));
-        c.open(QIODevice::WriteOnly); c.write(QByteArray("\xEF\xBB\xBF") + "a\r\nb\r\n"); c.close();
+        QVERIFY(c.open(QIODevice::WriteOnly)); c.write(QByteArray("\xEF\xBB\xBF") + "a\r\nb\r\n"); c.close();
         QVERIFY(g.openFile(c.fileName()).ok);
         QCOMPARE(g.toPlainText(), QString("a\nb"));
         ok(g);
         // empty file
         QFile em(dir.filePath("empty.txt"));
-        em.open(QIODevice::WriteOnly); em.close();
+        QVERIFY(em.open(QIODevice::WriteOnly)); em.close();
         QVERIFY(g.openFile(em.fileName()).ok);
         QCOMPARE(g.toPlainText(), QString(""));
         ok(g);
