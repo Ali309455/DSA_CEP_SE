@@ -16,6 +16,7 @@
 #include "Document.h"
 #include "Editor.h"
 #include "FileIO.h"
+#include "Snippets.h"
 #include "Stack.h"
 
 static int g_checks = 0;
@@ -1524,6 +1525,117 @@ static void testApplyCompletion() {
 }
 
 
+// ---------------------------------------------------------------- phase 4b + phase 5 engine additions
+
+static void testHashTableAndSnippets() {
+    std::cout << "[HashTable / Snippets]\n";
+    HashTable<std::string, int> h;
+    for (int i = 0; i < 1000; ++i) CHECK(h.put("k" + std::to_string(i), i));
+    CHECK(h.size() == 1000);
+    CHECK(h.bucketCount() >= 1000 / 0.75 - 1);                 // grew (rehash) to keep chains short
+    bool allFound = true;
+    for (int i = 0; i < 1000; ++i) { const int* v = h.get("k" + std::to_string(i)); if (!v || *v != i) allFound = false; }
+    CHECK(allFound);
+    CHECK(!h.put("k5", 99));                                   // overwrite, not new
+    CHECK(*h.get("k5") == 99);
+    CHECK(h.erase("k5") && !h.contains("k5") && !h.erase("k5"));
+    CHECK(h.get("nope") == nullptr);
+    CHECK(h.longestChain() < 20);
+    h.clear();
+    CHECK(h.size() == 0 && h.empty());
+
+    SnippetTable t;
+    t.loadDefaults();
+    CHECK(t.size() >= 15);
+    CHECK(t.find("for") != nullptr && t.find("nosuch") == nullptr);
+    CHECK(t.add("hello", "Hello $0 world"));
+    CHECK(!t.add("hello", "again $0"));                        // replace, not new
+    CHECK(t.find("hello")->body == "again $0");
+    CHECK(t.remove("hello") && !t.remove("hello"));
+    CHECK_THROWS(t.add("", "x"));
+    CHECK_THROWS(t.add("1abc", "x"));
+    CHECK_THROWS(t.add("a b", "x"));
+    CHECK_THROWS(t.add(std::string(33, 'a'), "x"));
+    CHECK_THROWS(t.add("ok", ""));
+    CHECK_THROWS(t.add("ok", "two $0 and $0"));
+    CHECK_THROWS(t.add("ok", "has\rcr"));
+    CHECK_THROWS(t.add("ok", std::string(4001, 'x')));
+    CHECK(t.find("ok") == nullptr);                            // a failed add changes nothing
+    DynArray<std::string> keys = t.triggers();
+    bool sorted = true;
+    for (size_t i = 1; i < keys.size(); ++i) if (!(keys[i - 1] < keys[i])) sorted = false;
+    CHECK(sorted);
+
+    // expansion
+    ExpandedSnippet e = expandBody("if ($0) {\n    \n}", "  ");
+    CHECK(e.text == "if () {\n      \n  }");
+    CHECK(e.hasCursor && e.cursorLine == 0 && e.cursorCol == 4);
+    e = expandBody("cost $$5", "");
+    CHECK(e.text == "cost $5" && !e.hasCursor);
+    CHECK_THROWS(expandBody("", ""));
+
+    // file round trip with escapes, bad lines skipped
+    SnippetTable a;
+    a.add("multi", "line1\n\tline2 \\ end $0");
+    IOResult r = a.saveToFile("snippets_test.tmp");
+    CHECK(r.ok);
+    SnippetTable b;
+    r = b.loadFromFile("snippets_test.tmp");
+    CHECK(r.ok && b.find("multi") && b.find("multi")->body == a.find("multi")->body);
+    CHECK(!b.loadFromFile("no_such_snippets_file.tmp").ok);
+    std::remove("snippets_test.tmp");
+}
+
+static void testPhase5EngineAdditions() {
+    std::cout << "[Phase 5 engine additions]\n";
+    // DynArray::resize
+    DynArray<int> a;
+    a.resize(5, 7);
+    CHECK(a.size() == 5 && a[4] == 7);
+    a.resize(2, 0);
+    CHECK(a.size() == 2);
+    a.resize(300, a[0]);                                       // fill value lives inside the array
+    CHECK(a.size() == 300 && a[299] == 7);
+
+    // Editor::loadText / markSaved
+    Editor ed;
+    ed.insertText(Pos{0, 0}, "abc");
+    CHECK(ed.canUndo());
+    ed.loadText("x\ny\n", "file.txt");
+    CHECK(text(ed.doc()) == "x\ny");
+    CHECK(!ed.canUndo() && !ed.canRedo() && !ed.doc().modified() && ed.doc().path() == "file.txt");
+    ed.insertText(Pos{0, 1}, "Q");
+    CHECK(ed.doc().modified());
+    ed.markSaved("other.txt");
+    CHECK(!ed.doc().modified() && ed.doc().path() == "other.txt");
+    ed.beginGroup("g");
+    CHECK(ed.inGroup());
+    ed.insertText(Pos{0, 0}, "1");
+    CHECK(!ed.undo());                                         // cannot undo while a group is open
+    ed.endGroup();
+    CHECK(!ed.inGroup() && ed.undo());
+    CHECK(text(ed.doc()) == "xQ\ny");
+
+    // Autocomplete::refresh skips the word being typed
+    Document d;
+    d.loadFromString("alphabet alpine alp");
+    Autocomplete ac;
+    ac.refresh(d);
+    DynArray<std::string> s = ac.suggest("alp", 8);
+    bool hasAlp = false;
+    for (size_t i = 0; i < s.size(); ++i) if (s[i] == "alphabet") hasAlp = true;
+    CHECK(hasAlp);
+    Document d2;
+    d2.loadFromString("zebrafish zebr");
+    Pos cursor{0, 14};                                         // end of "zebr"
+    ac.refresh(d2, &cursor);
+    s = ac.suggest("zeb", 8);
+    bool hasFish = false, hasHalf = false;
+    for (size_t i = 0; i < s.size(); ++i) { if (s[i] == "zebrafish") hasFish = true; if (s[i] == "zebr") hasHalf = true; }
+    CHECK(hasFish && !hasHalf);
+}
+
+
 int main() {
     testDynArray();
     testStack();
@@ -1565,6 +1677,8 @@ int main() {
     testAssistRankingThreshold();
     testAssistRandomRanking();
     testApplyCompletion();
+    testHashTableAndSnippets();
+    testPhase5EngineAdditions();
 
     std::cout << "\n" << (g_checks - g_failed) << "/" << g_checks << " checks passed";
     if (g_failed) std::cout << "  (" << g_failed << " FAILED)";

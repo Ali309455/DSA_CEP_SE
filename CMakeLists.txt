@@ -21,6 +21,7 @@ add_library(engine STATIC
   engine/Editor.cpp
   engine/FileIO.cpp
   engine/Search.cpp
+  engine/Snippets.cpp
   engine/Trie.cpp)
 target_include_directories(engine PUBLIC engine)
 
@@ -41,5 +42,40 @@ endif()
 enable_testing()
 add_test(NAME engine_tests COMMAND engine_tests)
 
-# Snippets (hash table) are in next_part_snippets/ and join the build in part 4b.
-# The GUI (Dear ImGui + GLFW) is added in a later phase.
+# ---- Phase 5: Qt GUI (DevPad). Needs Qt 6 (or Qt 5.15) Widgets. Turn off with -DBUILD_GUI=OFF ----
+option(BUILD_GUI "Build the Qt GUI (phase 5)" ON)
+if(BUILD_GUI)
+  find_package(Qt6 COMPONENTS Widgets Test QUIET)
+  if(Qt6_FOUND)
+    set(QT_NS Qt6)
+  else()
+    find_package(Qt5 5.15 COMPONENTS Widgets Test QUIET)
+    if(Qt5_FOUND)
+      set(QT_NS Qt5)
+    endif()
+  endif()
+  if(QT_NS)
+    message(STATUS "Qt GUI enabled (${QT_NS})")
+    set(CMAKE_AUTOMOC ON)
+    add_library(devpad_gui STATIC
+      gui/CodeEditor.cpp gui/CppHighlighter.cpp gui/FindBar.cpp gui/MainWindow.cpp
+      gui/RunManager.cpp gui/SnippetDialog.cpp)
+    target_include_directories(devpad_gui PUBLIC gui)
+    target_link_libraries(devpad_gui PUBLIC engine ${QT_NS}::Widgets)
+
+    add_executable(devpad WIN32 gui/main.cpp)
+    target_link_libraries(devpad PRIVATE devpad_gui)
+
+    if(TARGET ${QT_NS}::Test)
+      add_executable(gui_tests tests/gui_tests.cpp)
+      target_link_libraries(gui_tests PRIVATE devpad_gui ${QT_NS}::Test)
+      add_test(NAME gui_tests COMMAND gui_tests)
+      set_tests_properties(gui_tests PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+    else()
+      message(STATUS "Qt Test not found: gui_tests skipped")
+    endif()
+  else()
+    message(WARNING "Qt not found: the GUI is skipped (engine, tests and console editor still build). "
+                    "Install Qt 6 Widgets or pass -DCMAKE_PREFIX_PATH=<Qt folder>.")
+  endif()
+endif()

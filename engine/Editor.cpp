@@ -217,3 +217,17 @@ IOResult Editor::open(const std::string& path) {
 IOResult Editor::save(const std::string& path) {
     return saveFile(doc_, path);      // saving does not touch the history
 }
+
+void Editor::loadText(const std::string& text, const std::string& path) {
+    doc_.loadFromString(text);
+    doc_.setPath(path);
+    doc_.markSaved();
+    um_.clear();                      // old steps refer to the old text
+    depth_ = 0;
+    pending_.cmds.clear();
+}
+
+void Editor::markSaved(const std::string& path) {
+    doc_.setPath(path);
+    doc_.markSaved();
+}

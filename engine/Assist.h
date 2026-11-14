@@ -29,7 +29,9 @@ public:
     // Re-read the words of the document into the document trie (the old ones are
     // dropped, so counts never inflate). Words shorter than 2 characters, numbers
     // and words longer than Trie::kMaxWordLength are ignored. O(N).
-    void refresh(const Document& doc);
+    // Phase 5: if 'skipAt' is given, the word that touches that position (the one being
+    // typed) is NOT added, so half-typed words never show up as suggestions.
+    void refresh(const Document& doc, const Pos* skipAt = nullptr);
 
     // Suggestions for a prefix, best first, never more than 'maxResults'. The
     // prefix itself is not suggested. Empty or invalid prefix -> nothing.

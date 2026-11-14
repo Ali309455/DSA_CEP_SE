@@ -45,7 +45,7 @@ Autocomplete::Autocomplete() {
     for (size_t i = 0; i < sizeof(kDictionary) / sizeof(kDictionary[0]); ++i) dict_.insert(kDictionary[i], 1);
 }
 
-void Autocomplete::refresh(const Document& doc) {
+void Autocomplete::refresh(const Document& doc, const Pos* skipAt) {
     docWords_.clear();
     const size_t n = doc.lineCount();
     for (size_t ln = 0; ln < n; ++ln) {
@@ -56,7 +56,9 @@ void Autocomplete::refresh(const Document& doc) {
             size_t j = i;
             while (j < s.size() && isWordChar(s[j])) ++j;
             const bool startsWithDigit = s[i] >= '0' && s[i] <= '9';    // numbers and 0x1F, 3rd, ...
-            if (!startsWithDigit && j - i >= 2 && j - i <= Trie::kMaxWordLength) docWords_.insert(s.substr(i, j - i), 1);
+            const bool beingTyped = skipAt && skipAt->line == ln && skipAt->col >= i && skipAt->col <= j;
+            if (!beingTyped && !startsWithDigit && j - i >= 2 && j - i <= Trie::kMaxWordLength)
+                docWords_.insert(s.substr(i, j - i), 1);
             i = j;
         }
     }

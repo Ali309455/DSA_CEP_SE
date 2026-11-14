@@ -1,7 +1,7 @@
 # TextEditor - CS-218 DSA Complex Engineering Problem
 
 A text editor in C++ where the text engine is built from our own data structures.
-The GUI (later phase) is a thin layer on top; all editing logic lives in `engine/`.
+The Qt GUI (phase 5, `gui/`) is a thin layer on top; all editing logic lives in `engine/`.
 
 ## Status
 
@@ -11,11 +11,22 @@ The GUI (later phase) is a thin layer on top; all editing logic lives in `engine
 | **2** | Command records + Undo/Redo (two stacks), grouped edits, replace-range | **done** |
 | **3** | KMP search (find all, locations), replace one / replace all, whole-word / ignore-case | **done** |
 | **4a** | Bracket checker (stack), Trie autocomplete | **done** |
-| 4b | Hash-table snippets | next part (draft files in `next_part_snippets/`, not built yet) |
-| 5 | Dear ImGui + GLFW window: custom text rendering, menus, themes, Run button | |
+| **4b** | Hash-table snippets | **done** (moved to `engine/`, now built and tested) |
+| **5** | Qt Widgets GUI (DevPad): editor, find/replace, autocomplete, snippets, brackets, themes, Run button | **done** - see `PHASE5_REPORT.md` |
 | 6 | Report, complexity table, screenshots | |
 
-## Build (Windows, MSYS2 MinGW64 shell)
+## Build and run the GUI (phase 5)
+
+```
+cmake -S . -B build -DCMAKE_PREFIX_PATH=<your Qt folder>     # Qt 6 (or 5.15) with Widgets
+cmake --build build
+./build/devpad            # the editor     (build\devpad.exe on Windows)
+ctest --test-dir build --output-on-failure
+```
+Full instructions for Windows / Linux / macOS, the test list and a manual checklist: `PHASE5_REPORT.md`.
+Without Qt, CMake prints a warning and still builds the engine, tests and console editor.
+
+## Build the engine only (Windows, MSYS2 MinGW64 shell)
 
 ```
 pacman -S mingw-w64-x86_64-gcc mingw-w64-x86_64-cmake mingw-w64-x86_64-ninja
@@ -40,7 +51,11 @@ engine/Search.h/cpp   KMP: failure table, streaming matcher, findAll / findNext 
 engine/Brackets.h/cpp bracket checker: stack scan, skips strings / comments, recovery, match at cursor
 engine/Trie.h/cpp     prefix tree: insert / remove / weights / top-k completion (own code, no std::map)
 engine/Assist.h/cpp   autocomplete (keywords trie + document-words trie), applyCompletion through the Editor
+engine/HashTable.h    own hash table (chaining, FNV-1a, rehash at load 0.75)
+engine/Snippets.h/cpp snippet table on the hash table, $0 cursor marker, indentation-aware expansion
 engine/FileIO.h/cpp   open / save / save-as, errors returned not thrown
+gui/                  phase 5: Qt Widgets front end (CodeEditor, FindBar, MainWindow, RunManager, ...)
+tests/gui_tests.cpp   headless Qt tests incl. a random widget-vs-engine fuzz test
 app/console_main.cpp  command-line front end (1-based line/column numbers)
 tests/test_main.cpp   test suite incl. random stress test against a model
 ```

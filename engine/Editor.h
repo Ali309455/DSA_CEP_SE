@@ -87,6 +87,12 @@ public:
     void newDocument();
     IOResult open(const std::string& path);
     IOResult save(const std::string& path);
+    // Phase 5 (GUI): the GUI reads / writes files itself with Qt (Unicode file names,
+    // atomic save) and only hands the text over. loadText replaces the whole document
+    // and clears the history, exactly like open(). markSaved records a successful save.
+    void loadText(const std::string& text, const std::string& path);
+    void markSaved(const std::string& path);
+    bool inGroup() const { return depth_ > 0; }   // a group is open (see beginGroup)
 
 private:
     Document doc_;

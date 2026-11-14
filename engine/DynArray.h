@@ -129,6 +129,15 @@ public:
         if (newSize < size_) size_ = newSize;
     }
 
+    // Grow to newSize elements, filling new slots with 'fill' (or shrink). Phase 4b
+    // (HashTable buckets, Snippets) needs this.
+    void resize(size_t newSize, const T& fill) {
+        if (newSize <= size_) { size_ = newSize; return; }
+        T copy(fill);                    // 'fill' may live inside this array
+        reserve(newSize);
+        while (size_ < newSize) push_back(copy);
+    }
+
     void append(const DynArray& other) {
         if (this == &other) {
             DynArray copy(other);
