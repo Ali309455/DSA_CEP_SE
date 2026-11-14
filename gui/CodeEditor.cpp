@@ -54,19 +54,26 @@ CodeEditor::CodeEditor(QWidget* parent) : QPlainTextEdit(parent), theme_(Theme::
     setUndoRedoEnabled(false);               // the ENGINE does undo / redo
     setLineWrapMode(QPlainTextEdit::NoWrap);
     setFrameShape(QFrame::NoFrame);
+    document()->setDocumentMargin(4);  // small padding inside editor
     setCursorWidth(2);
     ed_.setHistoryLimit(1000);
     snips_.loadDefaults();
 
     QFont f = QFontDatabase::systemFont(QFontDatabase::FixedFont);
-    f.setPointSize(12);
+    f.setPointSize(13);
     setFont(f);
 
     highlighter_ = new CppHighlighter(document());
     gutter_ = new LineNumberArea(this);
     popup_ = new QListWidget(viewport());
-    popup_->setFocusPolicy(Qt::NoFocus);
+    popup_->setObjectName("completionPopup");
     popup_->setFrameShape(QFrame::StyledPanel);
+    popup_->setFrameShadow(QFrame::Plain);
+    popup_->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    popup_->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+    popup_->setMaximumHeight(200);
+    popup_->setMinimumWidth(180);
+    popup_->setFocusPolicy(Qt::NoFocus);
     popup_->hide();
     connect(popup_, &QListWidget::itemClicked, this, [this] { acceptCompletion(); setFocus(); });
 
@@ -82,6 +89,7 @@ CodeEditor::CodeEditor(QWidget* parent) : QPlainTextEdit(parent), theme_(Theme::
     setTheme(theme_);
     updateTabStop();
     updateLineNumberAreaWidth();
+    verticalScrollBar()->setSingleStep(1);
     runAnalysis();
 }
 
@@ -107,7 +115,12 @@ QString CodeEditor::displayName() const {
     return filePath_.isEmpty() ? QStringLiteral("untitled") : QFileInfo(filePath_).fileName();
 }
 
-void CodeEditor::updateTabStop() { setTabStopDistance(4 * fontMetrics().horizontalAdvance(QLatin1Char(' '))); }
+void CodeEditor::setTabSize(int spaces) {
+    tabSize_ = qBound(1, spaces, 16);
+    updateTabStop();
+}
+
+void CodeEditor::updateTabStop() { setTabStopDistance(tabSize_ * fontMetrics().horizontalAdvance(QLatin1Char(' '))); }
 
 void CodeEditor::changeEvent(QEvent* e) {
     QPlainTextEdit::changeEvent(e);
@@ -115,6 +128,13 @@ void CodeEditor::changeEvent(QEvent* e) {
 }
 
 void CodeEditor::wheelEvent(QWheelEvent* e) {
+    if (e->modifiers() & Qt::ControlModifier) {
+        const int delta = e->angleDelta().y();
+        if (delta > 0) zoomIn(1);
+        else if (delta < 0) zoomOut(1);
+        e->accept();
+        return;
+    }
     QPlainTextEdit::wheelEvent(e);
     updateTabStop();
 }
@@ -584,9 +604,11 @@ void CodeEditor::onCursorMoved() {
 // ====================================================================== line-number gutter
 
 int CodeEditor::lineNumberAreaWidth() const {
-    int digits = 3;
-    for (int m = qMax(1, blockCount()); m >= 1000; m /= 10) ++digits;
-    return 22 + fontMetrics().horizontalAdvance(QLatin1Char('9')) * digits;
+    int digits = 1;
+    int max = qMax(1, blockCount());
+    while (max >= 10) { max /= 10; ++digits; }
+    int space = 10 + fontMetrics().horizontalAdvance(QLatin1Char('9')) * digits;
+    return qMax(space, 40);
 }
 
 void CodeEditor::updateLineNumberAreaWidth() { setViewportMargins(lineNumberAreaWidth(), 0, 0, 0); }
@@ -614,12 +636,17 @@ void CodeEditor::lineNumberAreaPaintEvent(QPaintEvent* ev) {
     const int cur = textCursor().blockNumber();
     while (b.isValid() && top <= ev->rect().bottom()) {
         if (b.isVisible() && bottom >= ev->rect().top()) {
-            p.setPen(n == cur ? theme_.gutterActive : theme_.gutterFg);
-            p.drawText(0, top, gutter_->width() - 10, fontMetrics().height(), Qt::AlignRight, QString::number(n + 1));
+            const bool isCurrentLine = (n == cur);
+            const int height = fontMetrics().height();
+            p.setPen(isCurrentLine ? theme_.gutterActive : theme_.gutterFg);
+            if (isCurrentLine) {
+                p.fillRect(0, top, 2, height, theme_.accent);
+            }
+            p.drawText(0, top, lineNumberAreaWidth() - 6, height, Qt::AlignRight | Qt::AlignVCenter, QString::number(n + 1));
             if (issueLines_.contains(n)) {
                 p.setPen(Qt::NoPen);
                 p.setBrush(theme_.error);
-                p.drawEllipse(QPoint(8, top + fontMetrics().height() / 2), 3, 3);
+                p.drawEllipse(QPoint(8, top + height / 2), 3, 3);
             }
         }
         b = b.next();
@@ -801,6 +828,61 @@ void CodeEditor::duplicateLine() {
     setTextCursor(c);
 }
 
+void CodeEditor::deleteLine() {
+    QTextCursor c = textCursor();
+    UserEdit ue(*this, "delete line");
+    c.select(QTextCursor::LineUnderCursor);
+    c.removeSelectedText();
+    if (!c.atEnd()) c.deleteChar();
+    else if (!c.atStart()) c.deletePreviousChar();
+    setTextCursor(c);
+}
+
+void CodeEditor::insertLineAbove() {
+    QTextCursor c = textCursor();
+    UserEdit ue(*this, "insert line above");
+    c.movePosition(QTextCursor::StartOfBlock);
+    c.insertText(QStringLiteral("\n"));
+    c.movePosition(QTextCursor::PreviousBlock);
+    setTextCursor(c);
+}
+
+void CodeEditor::insertLineBelow() {
+    QTextCursor c = textCursor();
+    UserEdit ue(*this, "insert line below");
+    c.movePosition(QTextCursor::EndOfBlock);
+    c.insertText(QStringLiteral("\n"));
+    setTextCursor(c);
+}
+
+void CodeEditor::deleteWordAtCursor() {
+    QTextCursor c = textCursor();
+    UserEdit ue(*this, "delete word");
+    if (c.hasSelection()) {
+        c.removeSelectedText();
+    } else {
+        c.select(QTextCursor::WordUnderCursor);
+        c.removeSelectedText();
+    }
+    setTextCursor(c);
+}
+
+bool CodeEditor::goToMatchingBracket() {
+    const BracketReport& r = bracketReport();
+    Pos br, other;
+    if (matchNearCursor(ed_.doc(), r, cursorPos(), br, other)) {
+        const int o = offsetOf(other);
+        if (o >= 0) {
+            QTextCursor c = textCursor();
+            c.setPosition(o);
+            setTextCursor(c);
+            centerCursor();
+            return true;
+        }
+    }
+    return false;
+}
+
 // ====================================================================== paste / drop
 
 void CodeEditor::insertFromMimeData(const QMimeData* src) {
@@ -827,6 +909,13 @@ void CodeEditor::contextMenuEvent(QContextMenuEvent* e) {
     m.addAction(tr("Paste"), this, &QPlainTextEdit::paste);
     m.addSeparator();
     m.addAction(tr("Select All"), this, &QPlainTextEdit::selectAll);
+    m.addSeparator();
+    m.addAction(tr("Toggle Comment\tCtrl+/"), this, [this] { toggleComment(); });
+    m.addAction(tr("Duplicate Line\tCtrl+Shift+D"), this, [this] { duplicateLine(); });
+    m.addAction(tr("Delete Line\tCtrl+Shift+K"), this, [this] { deleteLine(); });
+    m.addAction(tr("Match Bracket\tCtrl+M"), this, [this] { goToMatchingBracket(); });
+    m.addAction(tr("Indent Selection\tTab"), this, [this] { indentSelection(true); });
+    m.addAction(tr("Unindent Selection\tShift+Tab"), this, [this] { indentSelection(false); });
     m.exec(e->globalPos());
 }
 

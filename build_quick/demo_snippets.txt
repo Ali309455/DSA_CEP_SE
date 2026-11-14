@@ -1,0 +1,23 @@
+# snippets: trigger<TAB>body  (\n = new line, \t = tab, \\ = backslash)
+cin	std::cin >> $0;
+class	class $0 {\npublic:\n    \nprivate:\n    \n};
+cout	std::cout << $0 << "\\n";
+do	do {\n    $0\n} while ();
+else	else {\n    $0\n}
+fn	void $0() {\n    \n}
+for	for (int i = 0; i < $0; ++i) {\n    \n}
+forr	for (auto& x : $0) {\n    \n}
+guard	#pragma once\n$0
+hi	Hello $0, cost $$5!
+if	if ($0) {\n    \n}
+ifelse	if ($0) {\n    \n} else {\n    \n}
+inc	#include <$0>
+incl	#include "$0"
+main	int main() {\n    $0\n    return 0;\n}
+ns	namespace $0 {\n\n}
+struct	struct $0 {\n    \n};
+switch	switch ($0) {\n    case 0:\n        break;\n    default:\n        break;\n}
+tmpl	template <typename T>\n$0
+try	try {\n    $0\n} catch (const std::exception& e) {\n    \n}
+vec	std::vector<$0> 
+while	while ($0) {\n    \n}

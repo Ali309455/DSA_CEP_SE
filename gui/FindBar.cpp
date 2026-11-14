@@ -11,20 +11,29 @@
 #include "TextUtil.h"
 
 FindBar::FindBar(CodeEditor* editor, QWidget* parent) : QWidget(parent), ed_(editor) {
+    // --- Widget creation ---
     find_ = new QLineEdit(this);
     find_->setPlaceholderText(tr("Find"));
     find_->setClearButtonEnabled(true);
+    find_->setObjectName("findInput");
+
     replace_ = new QLineEdit(this);
     replace_->setPlaceholderText(tr("Replace with"));
     replace_->setClearButtonEnabled(true);
+    replace_->setObjectName("replaceInput");
+
     caseBtn_ = new QToolButton(this);
     caseBtn_->setText(QStringLiteral("Aa"));
     caseBtn_->setToolTip(tr("Match case"));
     caseBtn_->setCheckable(true);
+    caseBtn_->setObjectName("findToggleBtn");
+
     wordBtn_ = new QToolButton(this);
     wordBtn_->setText(QStringLiteral("W"));
     wordBtn_->setToolTip(tr("Whole word"));
     wordBtn_->setCheckable(true);
+    wordBtn_->setObjectName("findToggleBtn");
+
     prev_ = new QPushButton(QStringLiteral("▲"), this);
     prev_->setToolTip(tr("Previous (Shift+Enter / Shift+F3)"));
     next_ = new QPushButton(QStringLiteral("▼"), this);
@@ -33,10 +42,13 @@ FindBar::FindBar(CodeEditor* editor, QWidget* parent) : QWidget(parent), ed_(edi
     repAll_ = new QPushButton(tr("Replace all"), this);
     close_ = new QPushButton(QStringLiteral("✕"), this);
     close_->setFlat(true);
+    close_->setObjectName("findCloseBtn");
+
     count_ = new QLabel(this);
     count_->setMinimumWidth(90);
     for (QPushButton* b : {prev_, next_, close_}) b->setMaximumWidth(34);
 
+    // --- Find row (row1) ---
     auto* row1 = new QHBoxLayout;
     row1->addWidget(find_, 1);
     row1->addWidget(caseBtn_);
@@ -45,16 +57,32 @@ FindBar::FindBar(CodeEditor* editor, QWidget* parent) : QWidget(parent), ed_(edi
     row1->addWidget(next_);
     row1->addWidget(count_);
     row1->addWidget(close_);
-    auto* row2 = new QHBoxLayout;
+
+    // --- Replace row wrapped in a container widget ---
+    replaceRow_ = new QWidget(this);
+    auto* row2 = new QHBoxLayout(replaceRow_);
+    row2->setContentsMargins(0, 0, 0, 0);
+    row2->setSpacing(4);
     row2->addWidget(replace_, 1);
     row2->addWidget(rep_);
     row2->addWidget(repAll_);
-    auto* col = new QVBoxLayout(this);
-    col->setContentsMargins(8, 6, 8, 6);
-    col->setSpacing(4);
-    col->addLayout(row1);
-    col->addLayout(row2);
+    replaceRow_->hide();
 
+    // --- Main layout ---
+    auto* col = new QVBoxLayout(this);
+    col->setContentsMargins(8, 4, 8, 4);
+    col->setSpacing(2);
+    col->addLayout(row1);
+    col->addWidget(replaceRow_);
+
+    // --- Height constraints ---
+    setMinimumHeight(36);
+    setMaximumHeight(50);
+
+    // --- Top border via stylesheet ---
+    setStyleSheet("FindBar { border-top: 1px solid palette(mid); }");
+
+    // --- Signals ---
     timer_.setSingleShot(true);
     connect(&timer_, &QTimer::timeout, this, &FindBar::refresh);
     connect(find_, &QLineEdit::textChanged, this, [this] { refresh(); if (!matches_.empty()) step(true); });
@@ -81,13 +109,18 @@ SearchOptions FindBar::options() const {
 void FindBar::openFind(bool withReplace) {
     QString sel = ed_->textCursor().selectedText();
     if (!sel.isEmpty() && !sel.contains(QChar(0x2029)) && sel.size() < 200) find_->setText(sel);
-    replace_->setVisible(true);
-    rep_->setVisible(true);
-    repAll_->setVisible(true);
+    replaceRow_->setVisible(withReplace);
+    replaceVisible_ = withReplace;
+    setMinimumHeight(withReplace ? 68 : 36);
+    setMaximumHeight(withReplace ? 90 : 50);
     show();
     (withReplace ? replace_ : find_)->setFocus();
     find_->selectAll();
     refresh();
+}
+
+void FindBar::toggleReplace() {
+    openFind(!replaceVisible_);
 }
 
 void FindBar::closeBar() {

@@ -1,7 +1,11 @@
 // MainWindow.h - menus, toolbar, panels and status bar around the CodeEditor.
 #pragma once
 #include <QMainWindow>
+#include <QSplitter>
+#include <QTimer>
 #include "Theme.h"
+
+struct EditorSettings;
 
 class CodeEditor;
 class FindBar;
@@ -13,6 +17,7 @@ class QLabel;
 class QLineEdit;
 class QMenu;
 class QPlainTextEdit;
+class QSplitter;
 class QTabWidget;
 class QTreeWidget;
 class QTreeWidgetItem;
@@ -49,6 +54,12 @@ private slots:
     void goToLineDialog();
     void chooseFolder();
     void nextProblem();
+    void themeNord();
+    void themeSolarizedLight();
+    void openSettingsDialog();
+    void matchBracket();
+    void onAutoSaveTimer();
+    void applySettings(const EditorSettings& s);
 
 private:
     CodeEditor* editor_;
@@ -62,13 +73,19 @@ private:
     QLineEdit* input_;
     QPlainTextEdit* inspector_;
     QLabel *posLabel_, *bracketLabel_, *historyLabel_, *infoLabel_;
+    QLabel* runStatusLabel_;
     QAction *undoA_, *redoA_, *runA_, *stopA_, *saveA_, *wrapA_, *autoCloseA_;
-    QAction *darkA_, *lightA_;
+    QAction *darkA_, *lightA_, *nordA_, *solarA_;
     QMenu* recentMenu_;
     QString themeName_ = "Midnight";
+    QString activeFile_;
     QString compilerFlags_;
     QStringList recent_;
     QList<QTreeWidgetItem*> compilerItems_;
+    QTimer autoSaveTimer_;
+    bool autoSaveEnabled_ = false;
+    int autoSaveIntervalSec_ = 3;
+    bool showUnsavedIndicator_ = true;
 
     void buildMenus();
     void loadSettings();

@@ -11,6 +11,7 @@
 #include <QHeaderView>
 #include <QInputDialog>
 #include <QLabel>
+#include <QLineEdit>
 #include <QMenu>
 #include <QMessageBox>
 #include <QPushButton>
@@ -27,14 +28,19 @@ FileExplorer::FileExplorer(QWidget* parent) : QWidget(parent) {
     applyFilter();
 
     tree_ = new QTreeView(this);
+    tree_->setAnimated(true);
+    tree_->setItemsExpandable(true);
+    tree_->setWordWrap(false);
+    tree_->setObjectName("explorerTree");
     tree_->setModel(model_);
     tree_->setHeaderHidden(true);
     tree_->setUniformRowHeights(true);
-    tree_->setIndentation(14);
+    tree_->setIndentation(16);
     tree_->setEditTriggers(QAbstractItemView::NoEditTriggers);
     tree_->setContextMenuPolicy(Qt::CustomContextMenu);
     tree_->setSelectionMode(QAbstractItemView::SingleSelection);
     tree_->setExpandsOnDoubleClick(false);     // we decide: files open, folders toggle
+    tree_->setStyleSheet("QTreeView::item { height: 22px; padding-left: 2px; }");
     for (int c = 1; c < 4; ++c) tree_->hideColumn(c);      // size / type / date
     tree_->sortByColumn(0, Qt::AscendingOrder);
     connect(tree_, &QTreeView::doubleClicked, this, [this](const QModelIndex& i) { activate(pathAt(i)); });
@@ -42,17 +48,19 @@ FileExplorer::FileExplorer(QWidget* parent) : QWidget(parent) {
 
     // header row: FOLDER NAME  [new file] [new folder] [collapse]
     title_ = new QLabel(this);
+    title_->setObjectName("explorerTitle");
     title_->setStyleSheet("font-weight:600; padding:4px 6px;");
     auto mkBtn = [this](const QString& text, const QString& tip) {
         auto* b = new QToolButton(this);
         b->setText(text);
         b->setToolTip(tip);
         b->setAutoRaise(true);
+        b->setObjectName("explorerBtn");
         return b;
     };
-    QToolButton* nf = mkBtn(QStringLiteral("+F"), tr("New File"));
-    QToolButton* nd = mkBtn(QStringLiteral("+D"), tr("New Folder"));
-    QToolButton* col = mkBtn(QStringLiteral("−"), tr("Collapse All"));
+    QToolButton* nf  = mkBtn(QStringLiteral("+"),  tr("New File (Ctrl+N)"));
+    QToolButton* nd  = mkBtn(QStringLiteral("⊞"), tr("New Folder"));
+    QToolButton* col = mkBtn(QStringLiteral("⊟"), tr("Collapse All"));
     auto* head = new QHBoxLayout;
     head->setContentsMargins(0, 0, 4, 0);
     head->addWidget(title_, 1);
@@ -63,11 +71,19 @@ FileExplorer::FileExplorer(QWidget* parent) : QWidget(parent) {
     connect(nd, &QToolButton::clicked, this, [this] { if (!root_.isEmpty()) uiNewFolder(targetDir(tree_->currentIndex())); });
     connect(col, &QToolButton::clicked, tree_, &QTreeView::collapseAll);
 
+    searchBox_ = new QLineEdit(this);
+    searchBox_->setPlaceholderText(tr("Filter files…"));
+    searchBox_->setClearButtonEnabled(true);
+    searchBox_->setObjectName("explorerSearch");
+    searchBox_->hide(); // shown only when folder is open
+    connect(searchBox_, &QLineEdit::textChanged, this, &FileExplorer::filterFiles);
+
     auto* treePage = new QWidget(this);
     auto* tl = new QVBoxLayout(treePage);
     tl->setContentsMargins(0, 0, 0, 0);
     tl->setSpacing(0);
     tl->addLayout(head);
+    tl->addWidget(searchBox_);
     tl->addWidget(tree_, 1);
 
     auto* emptyPage = new QWidget(this);
@@ -104,6 +120,18 @@ void FileExplorer::applyFilter() {
     QDir::Filters f = QDir::AllEntries | QDir::NoDotAndDotDot | QDir::AllDirs;
     if (showHidden_) f |= QDir::Hidden;
     model_->setFilter(f);
+    if (filterText_.isEmpty()) {
+        model_->setNameFilters(QStringList());
+        model_->setNameFilterDisables(false);
+    } else {
+        model_->setNameFilters(QStringList() << QStringLiteral("*%1*").arg(filterText_));
+        model_->setNameFilterDisables(false);
+    }
+}
+
+void FileExplorer::filterFiles(const QString& text) {
+    filterText_ = text.trimmed();
+    applyFilter();
 }
 
 bool FileExplorer::setRootPath(const QString& dir, QString* error) {
@@ -116,6 +144,10 @@ bool FileExplorer::setRootPath(const QString& dir, QString* error) {
     tree_->setRootIndex(model_->index(root_));
     title_->setText(fi.fileName().isEmpty() ? root_ : fi.fileName().toUpper());
     title_->setToolTip(root_);
+    searchBox_->show();
+    searchBox_->clear();
+    filterText_.clear();
+    applyFilter();
     stack_->setCurrentIndex(1);
     emit rootChanged(root_);
     return true;
@@ -123,6 +155,10 @@ bool FileExplorer::setRootPath(const QString& dir, QString* error) {
 
 void FileExplorer::clearRoot() {
     root_.clear();
+    searchBox_->hide();
+    searchBox_->clear();
+    filterText_.clear();
+    applyFilter();
     stack_->setCurrentIndex(0);
     emit rootChanged(QString());
 }

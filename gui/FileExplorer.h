@@ -6,8 +6,10 @@
 
 class QFileSystemModel;
 class QLabel;
+class QLineEdit;
 class QModelIndex;
 class QStackedWidget;
+class QToolButton;
 class QTreeView;
 
 class FileExplorer : public QWidget {
@@ -42,7 +44,10 @@ private:
     QTreeView* tree_;
     QStackedWidget* stack_;
     QLabel* title_;
+    QLineEdit* searchBox_;
+    QToolButton* refreshBtn_;
     QString root_;
+    QString filterText_;
     bool showHidden_ = false;
 
     QString pathAt(const QModelIndex& i) const;
@@ -53,4 +58,7 @@ private:
     void uiRename(const QString& path);
     void uiDelete(const QString& path);
     void applyFilter();
+
+private slots:
+    void filterFiles(const QString& text);
 };

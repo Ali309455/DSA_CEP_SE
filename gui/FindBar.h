@@ -30,6 +30,7 @@ public slots:
     void replaceAll();
     void closeBar();
     void refresh();                           // recompute matches (typing, options, text changed)
+    void toggleReplace();
 
 protected:
     bool eventFilter(QObject* o, QEvent* e) override;
@@ -43,6 +44,8 @@ private:
     QTimer timer_;
     DynArray<Match> matches_;
     int current_ = -1;
+    bool replaceVisible_ = false;
+    QWidget* replaceRow_;
 
     SearchOptions options() const;
     bool recompute(QString* err = nullptr);

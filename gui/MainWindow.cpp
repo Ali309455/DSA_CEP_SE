@@ -30,6 +30,7 @@
 #include "FileExplorer.h"
 #include "FindBar.h"
 #include "RunManager.h"
+#include "SettingsDialog.h"
 #include "SnippetDialog.h"
 #include "TextUtil.h"
 
@@ -51,11 +52,14 @@ static bool isInside(const QString& path, const QString& folder) {
 MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     setAcceptDrops(true);
     resize(1100, 740);
+    setMinimumSize(800, 500);
 
     editor_ = new CodeEditor(this);
     find_ = new FindBar(editor_, this);
     run_ = new RunManager(this);
     compilerFlags_ = QStringLiteral("-std=c++17 -Wall -Wextra -g");
+    nordA_ = nullptr;
+    solarA_ = nullptr;
 
     auto* central = new QWidget(this);
     auto* lay = new QVBoxLayout(central);
@@ -70,6 +74,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     explorerDock_ = new QDockWidget(tr("Explorer"), this);
     explorerDock_->setObjectName("explorerDock");
     explorerDock_->setWidget(explorer_);
+    explorerDock_->setFeatures(QDockWidget::DockWidgetClosable | QDockWidget::DockWidgetMovable);
     addDockWidget(Qt::LeftDockWidgetArea, explorerDock_);
     resizeDocks({explorerDock_}, {240}, Qt::Horizontal);
     connect(explorer_, &FileExplorer::fileActivated, this, [this](const QString& p) {
@@ -109,19 +114,24 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     auto* outL = new QVBoxLayout(outW);
     outL->setContentsMargins(0, 0, 0, 0);
     output_ = new QPlainTextEdit(this);
+    output_->setObjectName("terminalOutput");
     output_->setReadOnly(true);
     output_->setMaximumBlockCount(20000);
     output_->setFont(editor_->font());
     input_ = new QLineEdit(this);
     input_->setPlaceholderText(tr("Type input for the running program and press Enter"));
+    input_->setObjectName("terminalInput");
     outL->addWidget(output_, 1);
     outL->addWidget(input_);
+    tabs_->setMinimumHeight(100);
     tabs_->addTab(problems_, tr("Problems"));
     tabs_->addTab(outW, tr("Output"));
     auto* dock = new QDockWidget(tr("Panel"), this);
+    auto* panelDock = dock;
     dock->setObjectName("panelDock");
     dock->setWidget(tabs_);
     addDockWidget(Qt::BottomDockWidgetArea, dock);
+    resizeDocks({panelDock}, {160}, Qt::Vertical);
 
     inspector_ = new QPlainTextEdit(this);
     inspector_->setReadOnly(true);
@@ -133,10 +143,13 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     insDock->hide();
 
     // ---- status bar
+    runStatusLabel_ = new QLabel(this);
+    runStatusLabel_->setObjectName("runStatusLabel");
     posLabel_ = new QLabel(this);
     bracketLabel_ = new QLabel(this);
     historyLabel_ = new QLabel(this);
     infoLabel_ = new QLabel(QStringLiteral("UTF-8 · LF"), this);
+    statusBar()->addPermanentWidget(runStatusLabel_);
     for (QLabel* l : {posLabel_, bracketLabel_, historyLabel_, infoLabel_}) statusBar()->addPermanentWidget(l);
 
     buildMenus();
@@ -149,7 +162,15 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     menuBar()->actions().at(2)->menu()->addAction(dock->toggleViewAction());
     menuBar()->actions().at(2)->menu()->addAction(insDock->toggleViewAction());
 
-    connect(editor_, &CodeEditor::stateChanged, this, &MainWindow::refreshState);
+    autoSaveTimer_.setSingleShot(true);
+    connect(&autoSaveTimer_, &QTimer::timeout, this, &MainWindow::onAutoSaveTimer);
+
+    connect(editor_, &CodeEditor::stateChanged, this, [this] {
+        refreshState();
+        if (autoSaveEnabled_ && editor_->isModified() && !editor_->filePath().isEmpty()) {
+            autoSaveTimer_.start(autoSaveIntervalSec_ * 1000);
+        }
+    });
     connect(editor_, &CodeEditor::analysisUpdated, this, &MainWindow::refreshProblems);
     connect(editor_, &CodeEditor::analysisUpdated, this, &MainWindow::refreshInspector);
     connect(editor_, &CodeEditor::message, this, [this](const QString& m) { statusBar()->showMessage(m, 4000); });
@@ -162,6 +183,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
         stopA_->setEnabled(run_->busy());
         input_->setEnabled(run_->state() == RunManager::State::Running);
     });
+    connect(run_, &RunManager::stateChanged, this, &MainWindow::refreshState);
     connect(run_, &RunManager::finished, this, [this](bool ok, const QString& s) {
         statusBar()->showMessage(s, 6000);
         if (!ok && !compilerItems_.isEmpty()) tabs_->setCurrentIndex(0);
@@ -228,9 +250,13 @@ void MainWindow::buildMenus() {
     e->addSeparator();
     act(e, tr("Toggle &Comment"), QKeySequence(Qt::CTRL | Qt::Key_Slash), [this] { editor_->toggleComment(); });
     act(e, tr("&Duplicate Line"), QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_D), [this] { editor_->duplicateLine(); });
+    act(e, tr("Delete &Line"), QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_K), [this] { editor_->deleteLine(); });
+    act(e, tr("Insert Line &Above"), QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_Return), [this] { editor_->insertLineAbove(); });
+    act(e, tr("Insert Line &Below"), QKeySequence(Qt::CTRL | Qt::Key_Return), [this] { editor_->insertLineBelow(); });
     act(e, tr("&Indent"), QKeySequence(), [this] { editor_->indentSelection(true); });
     act(e, tr("U&nindent"), QKeySequence(), [this] { editor_->indentSelection(false); });
     e->addSeparator();
+    act(e, tr("Match &Bracket"), QKeySequence(Qt::CTRL | Qt::Key_M), [this] { matchBracket(); });
     act(e, tr("Auto&complete"), QKeySequence(Qt::CTRL | Qt::Key_Space), [this] { editor_->showCompletions(true); });
     act(e, tr("Expand &Snippet"), QKeySequence(Qt::CTRL | Qt::Key_J), [this] {
         if (!editor_->expandSnippetAtCursor()) statusBar()->showMessage(tr("No snippet trigger before the cursor."), 3000);
@@ -243,6 +269,8 @@ void MainWindow::buildMenus() {
     autoCloseA_->setCheckable(true);
     autoCloseA_->setChecked(true);
     connect(autoCloseA_, &QAction::toggled, this, [this](bool on) { editor_->setAutoClose(on); });
+    e->addSeparator();
+    act(e, tr("&Preferences / Settings..."), QKeySequence(Qt::CTRL | Qt::Key_Comma), [this] { openSettingsDialog(); });
 
     QMenu* v = menuBar()->addMenu(tr("&View"));
     QMenu* tm = v->addMenu(tr("&Theme"));
@@ -252,8 +280,15 @@ void MainWindow::buildMenus() {
     for (QAction* a : {darkA_, lightA_}) { a->setCheckable(true); grp->addAction(a); }
     connect(darkA_, &QAction::triggered, this, [this] { applyTheme("Midnight"); });
     connect(lightA_, &QAction::triggered, this, [this] { applyTheme("Daylight"); });
+    nordA_ = tm->addAction(tr("Nord (dark)"));
+    solarA_ = tm->addAction(tr("Solarized Light"));
+    for (QAction* a : {nordA_, solarA_}) { a->setCheckable(true); grp->addAction(a); }
+    connect(nordA_, &QAction::triggered, this, [this] { applyTheme("Nord"); });
+    connect(solarA_, &QAction::triggered, this, [this] { applyTheme("Solarized Light"); });
     act(v, tr("Zoom &In"), QKeySequence(Qt::CTRL | Qt::Key_Equal), [this] { editor_->zoomIn(1); });
     act(v, tr("Zoom &Out"), QKeySequence(Qt::CTRL | Qt::Key_Minus), [this] { editor_->zoomOut(1); });
+    act(v, tr("Command Palette..."), QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_P), [this] { openSettingsDialog(); });
+    act(v, tr("&Preferences / Settings..."), QKeySequence(Qt::CTRL | Qt::Key_Comma), [this] { openSettingsDialog(); });
     wrapA_ = act(v, tr("&Word Wrap"), QKeySequence(), [](bool) {});
     wrapA_->setCheckable(true);
     connect(wrapA_, &QAction::toggled, this, [this](bool on) {
@@ -293,16 +328,21 @@ void MainWindow::buildMenus() {
     QToolBar* tb = addToolBar(tr("Main"));
     tb->setObjectName("mainToolbar");
     tb->setMovable(false);
+    tb->setIconSize(QSize(16, 16));
+    tb->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
+    tb->setStyleSheet("QToolBar { spacing: 4px; }");
     for (const QString& n : {tr("New"), tr("Open"), tr("Save")}) Q_UNUSED(n);
-    tb->addAction(tr("New"), this, [this] { fileNew(); });
-    tb->addAction(tr("Open"), this, [this] { fileOpen(); });
-    tb->addAction(tr("Save"), this, [this] { fileSave(); });
+    tb->addAction(QStringLiteral("⊕ New"), this, [this] { fileNew(); });
+    tb->addAction(QStringLiteral("📂 Open"), this, [this] { fileOpen(); });
+    tb->addAction(QStringLiteral("💾 Save"), this, [this] { fileSave(); });
     tb->addSeparator();
     tb->addAction(undoA_);
     tb->addAction(redoA_);
     tb->addSeparator();
     tb->addAction(runA_);
     tb->addAction(stopA_);
+    tb->addSeparator();
+    tb->addAction(QStringLiteral("⚙ Settings"), this, [this] { openSettingsDialog(); });
     undoA_->setIconText(tr("Undo"));
     redoA_->setIconText(tr("Redo"));
     runA_->setIconText(QStringLiteral("▶ Run"));
@@ -323,7 +363,14 @@ void MainWindow::refreshState() {
     redoA_->setEnabled(ed.canRedo() && !ed.inGroup());   // typing in progress already invalidates redo
     undoA_->setText(ed.canUndo() ? tr("&Undo %1").arg(TextUtil::fromStd(ed.nextUndoLabel())) : tr("&Undo"));
     redoA_->setText(ed.canRedo() ? tr("&Redo %1").arg(TextUtil::fromStd(ed.nextRedoLabel())) : tr("&Redo"));
-    setWindowTitle(QStringLiteral("%1%2 — DevPad").arg(editor_->displayName(), editor_->isModified() ? "*" : ""));
+    const QString dot = (showUnsavedIndicator_ && editor_->isModified()) ? QStringLiteral(" ●") : QString();
+    setWindowTitle(QStringLiteral("%1%2 — DevPad").arg(editor_->displayName(), dot));
+    // Update run status label colour based on run state
+    if (run_->busy()) {
+        runStatusLabel_->setText(run_->state() == RunManager::State::Compiling ? "  ⚙ Compiling…  " : "  ▶ Running…  ");
+    } else {
+        runStatusLabel_->setText(QString());
+    }
 }
 
 void MainWindow::refreshProblems() {
@@ -542,8 +589,15 @@ void MainWindow::applyTheme(const QString& name) {
     const Theme t = Theme::byName(name);
     qApp->setStyle("Fusion");
     qApp->setPalette(t.palette());
+    qApp->setStyleSheet(Theme::appStyleSheet(t));
     editor_->setTheme(t);
-    (name == "Daylight" ? lightA_ : darkA_)->setChecked(true);
+    // update checkmarks
+    for (QAction* a : {darkA_, lightA_, nordA_, solarA_})
+        a->setChecked(false);
+    if      (name == "Daylight")        lightA_->setChecked(true);
+    else if (name == "Nord")            nordA_->setChecked(true);
+    else if (name == "Solarized Light") solarA_->setChecked(true);
+    else                                darkA_->setChecked(true);
     refreshProblems();
 }
 
@@ -553,9 +607,19 @@ void MainWindow::loadSettings() {
     compilerFlags_ = s.value("flags", compilerFlags_).toString();
     recent_ = s.value("recent").toStringList();
     const int fs = s.value("fontSize", 12).toInt();
+    const QString ff = s.value("fontFamily").toString();
     QFont f = editor_->font();
+    if (!ff.isEmpty()) f.setFamily(ff);
     f.setPointSize(qBound(6, fs, 48));
     editor_->setFont(f);
+    output_->setFont(f);
+    inspector_->setFont(f);
+
+    autoSaveEnabled_ = s.value("autoSave", false).toBool();
+    autoSaveIntervalSec_ = s.value("autoSaveInterval", 3).toInt();
+    showUnsavedIndicator_ = s.value("showUnsavedIndicator", true).toBool();
+    editor_->setTabSize(s.value("tabSize", 4).toInt());
+
     wrapA_->setChecked(s.value("wrap", false).toBool());
     autoCloseA_->setChecked(s.value("autoClose", true).toBool());
     restoreGeometry(s.value("geometry").toByteArray());
@@ -576,7 +640,12 @@ void MainWindow::saveSettings() {
     s.setValue("flags", compilerFlags_);
     s.setValue("recent", recent_);
     s.setValue("folder", explorer_->rootPath());
+    s.setValue("fontFamily", editor_->font().family());
     s.setValue("fontSize", editor_->font().pointSize());
+    s.setValue("autoSave", autoSaveEnabled_);
+    s.setValue("autoSaveInterval", autoSaveIntervalSec_);
+    s.setValue("showUnsavedIndicator", showUnsavedIndicator_);
+    s.setValue("tabSize", editor_->tabSize());
     s.setValue("wrap", wrapA_->isChecked());
     s.setValue("autoClose", autoCloseA_->isChecked());
     s.setValue("geometry", saveGeometry());
@@ -588,4 +657,67 @@ void MainWindow::closeEvent(QCloseEvent* e) {
     run_->stop();
     saveSettings();
     e->accept();
+}
+
+void MainWindow::themeNord() { applyTheme("Nord"); }
+void MainWindow::themeSolarizedLight() { applyTheme("Solarized Light"); }
+
+void MainWindow::matchBracket() {
+    if (!editor_->goToMatchingBracket()) {
+        statusBar()->showMessage(tr("No matching bracket found near cursor."), 2500);
+    }
+}
+
+void MainWindow::onAutoSaveTimer() {
+    if (editor_->isModified() && !editor_->filePath().isEmpty()) {
+        fileSave();
+        statusBar()->showMessage(tr("Auto-saved '%1'.").arg(editor_->filePath()), 2500);
+    }
+}
+
+void MainWindow::openSettingsDialog() {
+    EditorSettings s;
+    s.fontFamily = editor_->font().family();
+    s.fontSize = editor_->font().pointSize();
+    s.theme = themeName_;
+    s.autoSave = autoSaveEnabled_;
+    s.autoSaveIntervalSec = autoSaveIntervalSec_;
+    s.showUnsavedDot = showUnsavedIndicator_;
+    s.autoClose = editor_->autoClose();
+    s.wordWrap = (editor_->lineWrapMode() != QPlainTextEdit::NoWrap);
+    s.tabSize = editor_->tabSize();
+
+    SettingsDialog dlg(s, editor_->snippets(), snippetFile(), editor_->autocomplete(), this);
+    connect(&dlg, &SettingsDialog::settingsApplied, this, &MainWindow::applySettings);
+    if (dlg.exec() == QDialog::Accepted) {
+        applySettings(dlg.settings());
+    }
+}
+
+void MainWindow::applySettings(const EditorSettings& s) {
+    QFont f = editor_->font();
+    if (!s.fontFamily.isEmpty()) f.setFamily(s.fontFamily);
+    f.setPointSize(qBound(6, s.fontSize, 48));
+    editor_->setFont(f);
+    output_->setFont(f);
+    inspector_->setFont(f);
+
+    autoSaveEnabled_ = s.autoSave;
+    autoSaveIntervalSec_ = qMax(1, s.autoSaveIntervalSec);
+    showUnsavedIndicator_ = s.showUnsavedDot;
+
+    editor_->setAutoClose(s.autoClose);
+    autoCloseA_->setChecked(s.autoClose);
+
+    editor_->setLineWrapMode(s.wordWrap ? QPlainTextEdit::WidgetWidth : QPlainTextEdit::NoWrap);
+    wrapA_->setChecked(s.wordWrap);
+
+    editor_->setTabSize(s.tabSize);
+
+    if (themeName_ != s.theme) {
+        applyTheme(s.theme);
+    } else {
+        refreshState();
+    }
+    saveSettings();
 }

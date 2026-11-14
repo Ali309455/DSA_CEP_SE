@@ -5,15 +5,17 @@ static bool isIdChar(QChar c) { return c.isLetterOrNumber() || c == QChar('_'); 
 
 CppHighlighter::CppHighlighter(QTextDocument* doc) : QSyntaxHighlighter(doc) {
     const char* kw[] = {"alignas", "alignof", "auto", "break", "case", "catch", "class", "const", "constexpr",
-                        "const_cast", "continue", "decltype", "default", "delete", "do", "dynamic_cast", "else",
+                        "consteval", "constinit", "const_cast", "continue", "co_await", "co_return", "co_yield",
+                        "concept", "decltype", "default", "delete", "do", "dynamic_cast", "else",
                         "enum", "explicit", "export", "extern", "false", "final", "for", "friend", "goto", "if",
-                        "inline", "mutable", "namespace", "new", "noexcept", "nullptr", "operator", "override",
-                        "private", "protected", "public", "register", "reinterpret_cast", "return", "sizeof",
-                        "static", "static_assert", "static_cast", "struct", "switch", "template", "this", "throw",
-                        "true", "try", "typedef", "typeid", "typename", "union", "using", "virtual", "volatile",
-                        "while"};
-    const char* ty[] = {"bool", "char", "double", "float", "int", "long", "short", "signed", "unsigned", "void",
-                        "size_t", "string", "vector", "map", "set", "unordered_map", "unordered_set", "list",
+                        "import", "inline", "module", "mutable", "namespace", "new", "noexcept", "nullptr",
+                        "operator", "override", "private", "protected", "public", "register", "reinterpret_cast",
+                        "requires", "return", "sizeof", "static", "static_assert", "static_cast", "struct",
+                        "switch", "template", "this", "thread_local", "throw", "true", "try", "typedef", "typeid",
+                        "typename", "typeof", "union", "using", "virtual", "volatile", "while"};
+    const char* ty[] = {"bool", "char", "char8_t", "char16_t", "char32_t", "double", "float", "int", "long",
+                        "nullptr_t", "ptrdiff_t", "short", "signed", "size_t", "string", "unsigned", "void",
+                        "wchar_t", "vector", "map", "set", "unordered_map", "unordered_set", "list",
                         "deque", "array", "pair", "tuple", "optional", "variant", "unique_ptr", "shared_ptr",
                         "int8_t", "int16_t", "int32_t", "int64_t", "uint8_t", "uint16_t", "uint32_t", "uint64_t"};
     for (const char* k : kw) keywords_.insert(QString::fromLatin1(k));

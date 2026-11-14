@@ -72,7 +72,14 @@ public:
     void indentSelection(bool in);
     void toggleComment();
     void duplicateLine();
+    void deleteLine();
+    void insertLineAbove();
+    void insertLineBelow();
+    void deleteWordAtCursor();
+    bool goToMatchingBracket();
     void goToLine(int oneBased);
+    void setTabSize(int spaces);
+    int tabSize() const { return tabSize_; }
 
     // ---- positions: engine Pos (line, byte column) <-> widget offsets ----
     Pos posAt(int offset) const;
@@ -144,6 +151,7 @@ private:
     QElapsedTimer typingClock_;
     Kind hint_ = Kind::Other;       // which key caused a one-character delete
     bool autoClose_ = true;
+    int tabSize_ = 4;
 
     QTimer analysisTimer_;
     Theme theme_;

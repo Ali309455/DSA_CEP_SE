@@ -16,6 +16,6 @@ protected:
 
 private:
     Theme theme_;
-    QTextCharFormat fKeyword_, fType_, fString_, fComment_, fNumber_, fPreproc_, fFunction_;
+    QTextCharFormat fKeyword_, fType_, fString_, fComment_, fNumber_, fPreproc_, fFunction_, fOperator_;
     QSet<QString> keywords_, types_;
 };
