@@ -11,7 +11,7 @@ The GUI (later phase) is a thin layer on top; all editing logic lives in `engine
 | **2** | Command records + Undo/Redo (two stacks), grouped edits, replace-range | **done** |
 | **3** | KMP search (find all, locations), replace one / replace all, whole-word / ignore-case | **done** |
 | **4a** | Bracket checker (stack), Trie autocomplete | **done** |
-| 4b | Hash-table snippets | next part (draft files in `next_part_snippets/`, not built yet) |
+| **4b** | Hash-table snippets (own `HashTable`, expand through the Editor, file load/save) | **done** |
 | 5 | Dear ImGui + GLFW window: custom text rendering, menus, themes, Run button | |
 | 6 | Report, complexity table, screenshots | |
 
@@ -39,7 +39,9 @@ engine/Editor.h/cpp   Document + history: every edit goes through here
 engine/Search.h/cpp   KMP: failure table, streaming matcher, findAll / findNext on a Document
 engine/Brackets.h/cpp bracket checker: stack scan, skips strings / comments, recovery, match at cursor
 engine/Trie.h/cpp     prefix tree: insert / remove / weights / top-k completion (own code, no std::map)
-engine/Assist.h/cpp   autocomplete (keywords trie + document-words trie), applyCompletion through the Editor
+engine/Assist.h/cpp   autocomplete (keywords trie + document-words trie), applyCompletion + applySnippet through the Editor
+engine/HashTable.h    own hash table: separate chaining, FNV-1a, rehash at load 0.75 (replaces std::unordered_map)
+engine/Snippets.h/cpp snippet table on top of HashTable: rules, $0 / $$ expansion, built-in C++ snippets, file load/save
 engine/FileIO.h/cpp   open / save / save-as, errors returned not thrown
 app/console_main.cpp  command-line front end (1-based line/column numbers)
 tests/test_main.cpp   test suite incl. random stress test against a model
@@ -196,6 +198,42 @@ otherwise `m` doubles. (A brute-force comparison runs in the tests.)
 Console: `brackets`, `match <l> <c>`, `complete <prefix>` / `complete <l> <c>`,
 `accept <l> <c> <word>`, `dictadd <word>`, `dictdel <word>`.
 
+## Hash-table snippets (phase 4b)
+
+**Own hash table.** `HashTable<K, V, Hash>`: an array of buckets, each a singly linked chain of nodes;
+bucket = `hash(key) % buckets`. `StringHash` is FNV-1a (64 bit). When entries / buckets would pass
+0.75 the bucket array doubles and the nodes are *relinked* (no allocation, so a failed rehash cannot
+lose data). `put / get / erase / contains` are O(1) expected; rehash is O(n) but only on doubling, so
+`put` is O(1) amortized. Worst case O(n) when every key lands in one chain (the tests force exactly
+that with a constant hash). Not copyable: it owns its nodes (checked with AddressSanitizer: no leaks).
+
+**Snippets.** A snippet is a trigger word and a body. `SnippetTable` keeps them in the `HashTable`
+(only "is this word a snippet?" is asked, so no ordering is needed; `triggers()` sorts for display with
+our own merge sort). Body syntax: `$0` = where the cursor goes after expansion (at most once), `$$` =
+a literal `$`. `applySnippet(editor, table, cursor)` takes the word before the cursor, and if it is
+exactly a trigger replaces it with the body. Every line after the first gets the indentation of the line
+the trigger was typed on (blank lines stay blank). It is ONE undo step (label "snippet"). The cursor
+position to use afterwards is returned. 21 built-in C++ snippets (`for`, `while`, `if`, `ifelse`, `switch`,
+`main`, `class`, `cout`, `inc`, ...); `snippet defaults` reloads them.
+
+Files: one snippet per line, `trigger<TAB>body`, with `\n` `\t` `\\` escapes; `#` starts a comment line.
+
+| Situation | Result |
+|---|---|
+| trigger empty, > 32 chars, has a blank / symbol, starts with a digit | `std::invalid_argument`, table unchanged |
+| body empty, > 4000 chars, contains `\r` or NUL, has two `$0` | `std::invalid_argument`, table unchanged |
+| more than 500 snippets | `std::length_error` (replacing an existing one still works) |
+| expand with no word before the cursor / word is not a snippet / word is only part of a longer word (`xfor`) | not expanded, reason returned, nothing changed or recorded |
+| cursor in the middle of a word (`fo|r`) | not expanded, reason returned |
+| bad cursor | `std::out_of_range`, nothing changed |
+| snippet file missing, unreadable, a folder, over 1 MB | `IOResult{false, reason}`, table unchanged |
+| bad line in a snippet file (no TAB, bad trigger / body / escape, table full) | line skipped, count and first line number reported, rest loads |
+| file with UTF-8 BOM (Notepad) or Windows line endings | accepted |
+| save to a bad path | `IOResult{false, reason}` |
+| bad console input | message with the correct usage |
+
+Console: `expand <line> <col>`, `snippet list | show <trigger> | add <trigger> "<body>" | del <trigger> | load <file> | save <file> | defaults | stats`.
+
 ## Complexity (phase 1)
 
 N = characters in document, L = length of one line, n = lines, k = distance to a line.
@@ -230,9 +268,18 @@ N = characters in document, L = length of one line, n = lines, k = distance to a
 | `Autocomplete::suggest` | O(complete) x O(log) rounds worst case | usually one round |
 | `applyCompletion` | O(L + one insert) | one undo step |
 
+| **Phase 4b** (n = snippets, b = body length, T = trigger length) | | |
+| `HashTable::put / get / erase / contains` | O(T) hash + O(1) expected chain walk | worst case O(n) if all keys collide |
+| rehash | O(n), on doubling only | `put` is O(1) amortized; relinks nodes, no copying |
+| `SnippetTable::add` | O(T + b) | validation scans the body once |
+| `SnippetTable::triggers` | O(n log n) | merge sort of the keys |
+| `expandBody` | O(b + indent x lines) | |
+| `applySnippet` | O(L + b) + one replace | one undo step |
+| `loadFromFile` / `saveToFile` | O(file size) / O(n log n + total body) | file read once, size-limited |
+
 Space: O(N) for text, plus two pointers and one array header per line.
 
 ## Console commands
 
 Type `help` inside the editor. Lines and columns start at 1.
-`new open save saveas show info append addline ins nl del delword delrange dellines replace find replaceall replacenth undo redo history brackets match complete accept dictadd dictdel quit`
+`new open save saveas show info append addline ins nl del delword delrange dellines replace find replaceall replacenth undo redo history brackets match complete accept dictadd dictdel expand snippet quit`

@@ -130,3 +130,35 @@ Pos applyCompletion(Editor& ed, Pos cursor, const std::string& word) {
     EditGroup g(ed, "autocomplete");
     return ed.insertText(cursor, word.substr(prefix.size()));
 }
+
+SnippetExpansion applySnippet(Editor& ed, const SnippetTable& snippets, Pos cursor) {
+    SnippetExpansion r;
+    r.cursor = cursor;
+    Pos start;
+    const std::string line = ed.doc().getLine(cursor.line < ed.doc().lineCount() ? cursor.line : 0);
+    r.trigger = prefixBefore(ed.doc(), cursor, &start);               // validates the cursor
+    if (r.trigger.empty()) { r.reason = "There is no word before the cursor to expand."; return r; }
+    if (cursor.col < line.size() && isWordChar(line[cursor.col])) {
+        r.reason = "The cursor is in the middle of a word; move it to the end of \"" + r.trigger + "\" first.";
+        return r;
+    }
+    const Snippet* sn = r.trigger.size() <= SnippetTable::kMaxTrigger ? snippets.find(r.trigger) : nullptr;
+    if (!sn) {
+        r.reason = r.trigger.size() <= SnippetTable::kMaxTrigger
+                       ? "\"" + r.trigger + "\" is not a snippet."
+                       : "The word before the cursor is too long to be a snippet.";
+        return r;
+    }
+    // Indentation of the current line (only the part left of the trigger).
+    size_t ind = 0;
+    while (ind < start.col && (line[ind] == ' ' || line[ind] == '\t')) ++ind;
+    ExpandedSnippet ex = expandBody(sn->body, line.substr(0, ind));   // throws only if a stored body were invalid
+    {
+        EditGroup g(ed, "snippet");
+        ed.replaceRange(start, cursor, ex.text);
+    }
+    r.cursor.line = start.line + ex.cursorLine;
+    r.cursor.col = ex.cursorLine == 0 ? start.col + ex.cursorCol : ex.cursorCol;
+    r.expanded = true;
+    return r;
+}

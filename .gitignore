@@ -2,3 +2,5 @@ build/
 *.exe
 *.o
 *.a
+
+build_quick/

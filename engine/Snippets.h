@@ -42,9 +42,10 @@ struct ExpandedSnippet {
 
 class SnippetTable {
 public:
-    static const size_t kMaxSnippets = 500;
-    static const size_t kMaxTrigger = 32;
-    static const size_t kMaxBody = 4000;
+    static constexpr size_t kMaxSnippets = 500;
+    static constexpr size_t kMaxTrigger = 32;
+    static constexpr size_t kMaxBody = 4000;
+    static constexpr size_t kMaxFileBytes = 1000000;   // snippet files bigger than this are refused
 
     SnippetTable() {}
 
@@ -65,8 +66,11 @@ public:
     void loadDefaults();
 
     // One snippet per line:  trigger <TAB> body   with \n \t \\ escapes in the body.
-    // Lines that are empty or start with '#' are ignored; a bad line is skipped and
-    // counted in the message (the rest still loads).
+    // Lines that are empty or start with '#' are ignored (a UTF-8 byte-order mark at the
+    // start of the file and Windows line endings are accepted). A bad line is skipped and
+    // counted in the message, with the number of the first one (the rest still loads).
+    // A missing file, a folder, a file over kMaxFileBytes or a read error -> ok == false,
+    // and the table is not changed.
     IOResult loadFromFile(const std::string& path);
     IOResult saveToFile(const std::string& path) const;
 

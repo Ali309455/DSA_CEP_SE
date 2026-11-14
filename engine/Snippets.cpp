@@ -1,9 +1,10 @@
 // Snippets.cpp - see Snippets.h.
 #include "Snippets.h"
 #include <fstream>
+#include <cstdio>
 #include <stdexcept>
 
-static bool isWordChar(char c) {
+static bool isTriggerChar(char c) {
     return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_';
 }
 
@@ -11,7 +12,7 @@ bool SnippetTable::validTrigger(const std::string& t) {
     if (t.empty() || t.size() > kMaxTrigger) return false;
     if (t[0] >= '0' && t[0] <= '9') return false;
     for (size_t i = 0; i < t.size(); ++i)
-        if (!isWordChar(t[i])) return false;
+        if (!isTriggerChar(t[i])) return false;
     return true;
 }
 
@@ -116,8 +117,10 @@ ExpandedSnippet expandBody(const std::string& body, const std::string& indent) {
         r.text.push_back(c);
         if (c == '\n') {
             ++line;
-            r.text += indent;
-            col = indent.size();
+            // Blank lines stay blank (no trailing spaces); every other line is indented.
+            const bool blank = (i + 1 >= body.size()) || body[i + 1] == '\n';
+            if (!blank) r.text += indent;
+            col = blank ? 0 : indent.size();
         } else {
             ++col;
         }
@@ -172,23 +175,50 @@ IOResult SnippetTable::loadFromFile(const std::string& path) {
     if (path.empty()) return IOResult{false, "No filename given."};
     std::ifstream in(path.c_str(), std::ios::in | std::ios::binary);
     if (!in) return IOResult{false, "Cannot open '" + path + "': file does not exist or is not readable."};
-    size_t loaded = 0, skipped = 0;
-    std::string line;
-    while (std::getline(in, line)) {
+
+    // Read the whole file first (size-limited), so a folder, a huge file or a read
+    // error is reported before the table is touched.
+    std::string data;
+    char buf[4096];
+    while (in.read(buf, sizeof buf) || in.gcount() > 0) {
+        data.append(buf, static_cast<size_t>(in.gcount()));
+        if (data.size() > kMaxFileBytes)
+            return IOResult{false, "'" + path + "' is too large for a snippet file (limit " +
+                                       std::to_string(kMaxFileBytes) + " bytes)."};
+    }
+    if (in.bad() || (!in.eof() && in.fail()))
+        return IOResult{false, "Error while reading '" + path + "' (is it a folder?)."};
+
+    size_t pos = 0;
+    if (data.compare(0, 3, "\xEF\xBB\xBF") == 0) pos = 3;          // UTF-8 byte-order mark (Notepad)
+    size_t loaded = 0, skipped = 0, firstBad = 0, lineNo = 0;
+    while (pos < data.size()) {
+        size_t nl = data.find('\n', pos);
+        if (nl == std::string::npos) nl = data.size();
+        std::string line = data.substr(pos, nl - pos);
+        pos = nl + 1;
+        ++lineNo;
         if (!line.empty() && line[line.size() - 1] == '\r') line.erase(line.size() - 1);
         if (line.empty() || line[0] == '#') continue;
         size_t tab = line.find('\t');
         std::string body;
-        if (tab == std::string::npos || !unescapeBody(line.substr(tab + 1), body)) { ++skipped; continue; }
-        try {
-            add(line.substr(0, tab), body);
+        bool good = tab != std::string::npos && unescapeBody(line.substr(tab + 1), body);
+        if (good) {
+            try {
+                add(line.substr(0, tab), body);
+            } catch (const std::exception&) {
+                good = false;                      // bad trigger / body, or the table is full
+            }
+        }
+        if (good) {
             ++loaded;
-        } catch (const std::exception&) {
+        } else {
+            if (skipped == 0) firstBad = lineNo;
             ++skipped;
         }
     }
-    if (in.bad()) return IOResult{false, "Error while reading '" + path + "' (is it a folder?)."};
     std::string msg = "Loaded " + std::to_string(loaded) + " snippet(s) from '" + path + "'.";
-    if (skipped) msg += " Skipped " + std::to_string(skipped) + " invalid line(s).";
+    if (skipped)
+        msg += " Skipped " + std::to_string(skipped) + " invalid line(s) (first: line " + std::to_string(firstBad) + ").";
     return IOResult{true, msg};
 }

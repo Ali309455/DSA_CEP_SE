@@ -1,0 +1,19 @@
+# Runs the whole test suite on every push, plus once under AddressSanitizer/UBSan.
+# Free for public repos; you do not need to build anything on your own PC.
+name: tests
+on: [push, pull_request]
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+      - run: cmake --build build -j2
+      - run: ctest --test-dir build --output-on-failure
+  sanitizers:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer"
+      - run: cmake --build build -j2
+      - run: ctest --test-dir build --output-on-failure

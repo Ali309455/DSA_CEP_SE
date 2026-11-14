@@ -129,6 +129,16 @@ public:
         if (newSize < size_) size_ = newSize;
     }
 
+    // Make the array exactly newSize long. Growing fills the new slots with copies of
+    // 'fill'; shrinking drops the tail. O(newSize - size) (plus one reallocation).
+    void resize(size_t newSize, const T& fill = T()) {
+        if (newSize > size_) {
+            T copy = fill;  // 'fill' might live inside our own buffer
+            reserve(newSize);
+            for (size_t i = size_; i < newSize; ++i) data_[i] = copy;
+        }
+        size_ = newSize;
+    }
     void append(const DynArray& other) {
         if (this == &other) {
             DynArray copy(other);

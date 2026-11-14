@@ -21,6 +21,7 @@ add_library(engine STATIC
   engine/Editor.cpp
   engine/FileIO.cpp
   engine/Search.cpp
+  engine/Snippets.cpp
   engine/Trie.cpp)
 target_include_directories(engine PUBLIC engine)
 
@@ -41,5 +42,5 @@ endif()
 enable_testing()
 add_test(NAME engine_tests COMMAND engine_tests)
 
-# Snippets (hash table) are in next_part_snippets/ and join the build in part 4b.
+# Snippets (hash table, phase 4b) are part of the engine library above.
 # The GUI (Dear ImGui + GLFW) is added in a later phase.

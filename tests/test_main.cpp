@@ -4,7 +4,9 @@
 #include <cstdio>
 #include <cctype>
 #include <cstdlib>
+#include <fstream>
 #include <iostream>
+#include <stdexcept>
 #include <string>
 
 #include <map>
@@ -16,6 +18,8 @@
 #include "Document.h"
 #include "Editor.h"
 #include "FileIO.h"
+#include "HashTable.h"
+#include "Snippets.h"
 #include "Stack.h"
 
 static int g_checks = 0;
@@ -1523,6 +1527,387 @@ static void testApplyCompletion() {
     CHECK(ed.doc().checkInvariants());
 }
 
+// ------------------------------------------------------------------ Phase 4b: hash table + snippets
+
+struct ConstHash {                       // every key in ONE chain: worst case on purpose
+    size_t operator()(const std::string&) const { return 7; }
+};
+struct IntHash {
+    size_t operator()(int k) const { return static_cast<size_t>(k) * 2654435761u; }
+};
+
+static void testHashTableBasics() {
+    section("HashTable: basics");
+    HashTable<std::string, int> t;
+    CHECK(t.empty() && t.size() == 0 && t.bucketCount() == 16);
+    CHECK(t.get("a") == nullptr && !t.contains("a") && !t.erase("a") && t.longestChain() == 0);
+    CHECK(t.put("a", 1) && t.size() == 1 && t.contains("a"));
+    CHECK(t.get("a") && *t.get("a") == 1);
+    CHECK(!t.put("a", 2) && t.size() == 1 && *t.get("a") == 2);        // overwrite, not a new key
+    CHECK(t.put("", 5) && t.contains("") && *t.get("") == 5);          // empty key is a key
+    *t.get("a") = 9;                                                    // pointer is writable
+    CHECK(*t.get("a") == 9);
+    const HashTable<std::string, int>& ct = t;
+    CHECK(ct.get("a") && *ct.get("a") == 9 && ct.get("zz") == nullptr);
+    CHECK(t.erase("a") && !t.contains("a") && t.size() == 1 && !t.erase("a"));
+    t.clear();
+    CHECK(t.empty() && !t.contains("") && t.bucketCount() >= 16);
+    CHECK(t.put("again", 1) && t.size() == 1);                          // usable after clear
+    // keys that differ in one character / in case / with embedded NUL
+    HashTable<std::string, int> u;
+    u.put("for", 1); u.put("fori", 2); u.put("form", 3); u.put("For", 4);
+    u.put(std::string("a\0b", 3), 5); u.put(std::string("a\0c", 3), 6);
+    CHECK(u.size() == 6 && *u.get("for") == 1 && *u.get("For") == 4 && *u.get(std::string("a\0c", 3)) == 6);
+    CHECK(u.get("a") == nullptr);
+    // other key type
+    HashTable<int, int, IntHash> h;
+    for (int i = -50; i < 50; ++i) h.put(i, i * i);
+    bool ok = h.size() == 100;
+    for (int i = -50; i < 50; ++i) ok = ok && h.get(i) && *h.get(i) == i * i;
+    CHECK(ok && h.get(50) == nullptr);
+}
+
+static void testHashTableCollisions() {
+    section("HashTable: collisions, erase in a chain, rehash");
+    HashTable<std::string, int, ConstHash> t;
+    for (int i = 0; i < 40; ++i) t.put("k" + std::to_string(i), i);
+    CHECK(t.size() == 40 && t.longestChain() == 40);                    // one long chain
+    bool ok = true;
+    for (int i = 0; i < 40; ++i) ok = ok && t.get("k" + std::to_string(i)) && *t.get("k" + std::to_string(i)) == i;
+    CHECK(ok);
+    CHECK(t.erase("k39") && t.erase("k0") && t.erase("k20"));            // head, tail and middle of the chain
+    CHECK(!t.contains("k39") && !t.contains("k0") && !t.contains("k20") && t.size() == 37);
+    ok = true;
+    for (int i = 1; i < 39; ++i) if (i != 20) ok = ok && t.contains("k" + std::to_string(i));
+    CHECK(ok);
+    // rehash keeps everything and keeps the load factor under 0.75
+    HashTable<std::string, int> g;
+    size_t buckets0 = g.bucketCount();
+    for (int i = 0; i < 1000; ++i) g.put("key" + std::to_string(i), i);
+    CHECK(g.bucketCount() > buckets0 && g.loadFactor() <= 0.75 + 1e-9);
+    size_t b = g.bucketCount();
+    CHECK((b & (b - 1)) == 0);                                          // still a power of two
+    ok = true;
+    for (int i = 0; i < 1000; ++i) ok = ok && g.get("key" + std::to_string(i)) && *g.get("key" + std::to_string(i)) == i;
+    CHECK(ok);
+    // overwriting must not grow the table or change the size
+    size_t before = g.bucketCount();
+    for (int i = 0; i < 1000; ++i) g.put("key" + std::to_string(i), -i);
+    CHECK(g.size() == 1000 && g.bucketCount() == before && *g.get("key7") == -7);
+    // forEach visits every entry exactly once
+    size_t visits = 0;
+    long long sum = 0;
+    g.forEach([&](const std::string&, const int& v) { ++visits; sum += v; });
+    CHECK(visits == 1000 && sum == -(999LL * 1000 / 2));
+}
+
+static void testHashTableRandom() {
+    section("HashTable: random operations against std::map");
+    unsigned seed = 12345;
+    auto rnd = [&seed]() { seed = seed * 1103515245u + 12345u; return (seed >> 8) & 0xFFFFFF; };
+    HashTable<std::string, int> t;
+    std::map<std::string, int> model;
+    bool same = true;
+    for (int step = 0; step < 60000 && same; ++step) {
+        std::string key = "w" + std::to_string(rnd() % 300);
+        switch (rnd() % 4) {
+            case 0: case 1: { int v = static_cast<int>(rnd()); bool fresh = model.find(key) == model.end(); model[key] = v; same = same && t.put(key, v) == fresh; break; }
+            case 2: same = same && t.erase(key) == (model.erase(key) == 1); break;
+            default: { auto it = model.find(key); const int* p = t.get(key); same = same && ((it == model.end()) == (p == nullptr)) && (!p || *p == it->second); break; }
+        }
+        same = same && t.size() == model.size();
+    }
+    CHECK(same);
+    size_t seen = 0;
+    bool all = true;
+    t.forEach([&](const std::string& k, const int& v) { ++seen; auto it = model.find(k); all = all && it != model.end() && it->second == v; });
+    CHECK(all && seen == model.size());
+}
+
+static void testHashTableLarge() {
+    section("HashTable: 200 000 keys stay fast and balanced");
+    HashTable<std::string, int> t;
+    const int N = 200000;
+    for (int i = 0; i < N; ++i) t.put("identifier_" + std::to_string(i), i);
+    CHECK(t.size() == static_cast<size_t>(N));
+    CHECK(t.longestChain() <= 12);                                      // FNV-1a spreads similar names well
+    bool ok = true;
+    for (int i = 0; i < N; i += 7) ok = ok && t.get("identifier_" + std::to_string(i)) && *t.get("identifier_" + std::to_string(i)) == i;
+    CHECK(ok && !t.contains("identifier_" + std::to_string(N)));
+    for (int i = 0; i < N; ++i) t.erase("identifier_" + std::to_string(i));
+    CHECK(t.empty() && t.longestChain() == 0);
+}
+
+static void testSnippetRules() {
+    section("Snippets: trigger / body rules and the table");
+    CHECK(SnippetTable::validTrigger("for") && SnippetTable::validTrigger("_x1") && SnippetTable::validTrigger("A"));
+    CHECK(SnippetTable::validTrigger(std::string(32, 'a')));
+    CHECK(!SnippetTable::validTrigger("") && !SnippetTable::validTrigger(std::string(33, 'a')));
+    CHECK(!SnippetTable::validTrigger("1a") && !SnippetTable::validTrigger("a b") && !SnippetTable::validTrigger("a-b"));
+    CHECK(!SnippetTable::validTrigger("a\t") && !SnippetTable::validTrigger("a\n") && !SnippetTable::validTrigger(std::string("a\0", 2)));
+    CHECK(SnippetTable::bodyProblem("ok").empty() && SnippetTable::bodyProblem("a$0b").empty() && SnippetTable::bodyProblem("$$0 and $0").empty());
+    CHECK(!SnippetTable::bodyProblem("").empty());
+    CHECK(!SnippetTable::bodyProblem(std::string(4001, 'x')).empty() && SnippetTable::bodyProblem(std::string(4000, 'x')).empty());
+    CHECK(!SnippetTable::bodyProblem("a\rb").empty() && !SnippetTable::bodyProblem(std::string("a\0b", 3)).empty());
+    CHECK(!SnippetTable::bodyProblem("$0 $0").empty());
+    CHECK(SnippetTable::bodyProblem("$$0 $$0").empty());                // two literal "$0" are fine
+    CHECK(SnippetTable::bodyProblem("cost: $").empty() && SnippetTable::bodyProblem("$5 $x").empty());
+
+    SnippetTable s;
+    CHECK(s.size() == 0 && s.find("x") == nullptr && s.triggers().empty() && !s.remove("x"));
+    CHECK(s.add("x", "one") && s.size() == 1 && s.find("x")->body == "one" && s.find("x")->trigger == "x");
+    CHECK(!s.add("x", "two") && s.size() == 1 && s.find("x")->body == "two");          // replace
+    CHECK_THROWS(s.add("", "b"));
+    CHECK_THROWS(s.add("bad name", "b"));
+    CHECK_THROWS(s.add("ok", ""));
+    CHECK_THROWS(s.add("ok", "$0$0"));
+    CHECK(s.size() == 1 && s.find("ok") == nullptr);                    // failed adds changed nothing
+    CHECK(s.remove("x") && s.size() == 0 && !s.remove("x"));
+
+    // the 500 limit: replacing an existing one is still allowed when full
+    for (size_t i = 0; i < SnippetTable::kMaxSnippets; ++i) s.add("t" + std::to_string(i), "b");
+    CHECK(s.size() == SnippetTable::kMaxSnippets);
+    bool threwLength = false;
+    try { s.add("one_too_many", "b"); } catch (const std::length_error&) { threwLength = true; }
+    CHECK(threwLength && s.size() == SnippetTable::kMaxSnippets && s.find("one_too_many") == nullptr);
+    CHECK(!s.add("t0", "new body") && s.find("t0")->body == "new body");
+    CHECK(s.remove("t1") && s.add("one_too_many", "b"));                // room again
+    CHECK(s.longestChain() <= 10 && s.bucketCount() >= 512);
+
+    // triggers() is sorted and complete
+    SnippetTable d;
+    d.add("zeta", "z"); d.add("Alpha", "a"); d.add("beta", "b"); d.add("_u", "u"); d.add("alpha", "a2");
+    DynArray<std::string> k = d.triggers();
+    CHECK(k.size() == 5 && k[0] == "Alpha" && k[1] == "_u" && k[2] == "alpha" && k[3] == "beta" && k[4] == "zeta");
+    d.clear();
+    CHECK(d.size() == 0 && d.find("beta") == nullptr);
+}
+
+static void testSnippetDefaults() {
+    section("Snippets: built-in C++ snippets");
+    SnippetTable s;
+    s.loadDefaults();
+    CHECK(s.size() >= 15);
+    const char* must[] = {"for", "while", "if", "ifelse", "switch", "main", "class", "struct", "cout", "inc"};
+    for (size_t i = 0; i < sizeof must / sizeof must[0]; ++i) CHECK(s.find(must[i]) != nullptr);
+    size_t before = s.size();
+    s.add("for", "custom $0");
+    s.loadDefaults();                                                    // defaults replace, never duplicate
+    CHECK(s.size() == before && s.find("for")->body != "custom $0");
+    // every default is valid and expands without error
+    DynArray<std::string> k = s.triggers();
+    bool ok = true;
+    for (size_t i = 0; i < k.size(); ++i) {
+        try { ExpandedSnippet e = expandBody(s.find(k[i])->body, "  "); ok = ok && !e.text.empty() && e.text.find('\r') == std::string::npos; }
+        catch (...) { ok = false; }
+    }
+    CHECK(ok);
+}
+
+static void testExpandBody() {
+    section("Snippets: expandBody (cursor, indent, escapes)");
+    ExpandedSnippet e = expandBody("abc", "");
+    CHECK(e.text == "abc" && !e.hasCursor && e.cursorLine == 0 && e.cursorCol == 3);      // no $0: end of text
+    e = expandBody("f($0)", "");
+    CHECK(e.text == "f()" && e.hasCursor && e.cursorLine == 0 && e.cursorCol == 2);
+    e = expandBody("if ($0) {\n    \n}", "  ");
+    CHECK(e.text == "if () {\n      \n  }" && e.cursorLine == 0 && e.cursorCol == 4);
+    e = expandBody("{\n    $0\n}", "\t");
+    CHECK(e.text == "{\n\t    \n\t}" && e.cursorLine == 1 && e.cursorCol == 5);          // indent (1) + 4 spaces
+    e = expandBody("a\n$0b", "  ");
+    CHECK(e.text == "a\n  b" && e.cursorLine == 1 && e.cursorCol == 2);                  // $0 at the start of an indented line
+    e = expandBody("a\n\nb", "    ");
+    CHECK(e.text == "a\n\n    b");                                                       // blank line stays blank
+    e = expandBody("a\n", "  ");
+    CHECK(e.text == "a\n" && e.cursorLine == 1 && e.cursorCol == 0);                     // trailing newline: no indent
+    e = expandBody("cost $$5 and $x and $", "");
+    CHECK(e.text == "cost $5 and $x and $" && !e.hasCursor);
+    e = expandBody("$$0", "");
+    CHECK(e.text == "$0" && !e.hasCursor);                                               // escaped, so NOT a cursor
+    e = expandBody("$0", "");
+    CHECK(e.text.empty() && e.hasCursor && e.cursorLine == 0 && e.cursorCol == 0);
+    e = expandBody("x$$$0y", "");
+    CHECK(e.text == "x$y" && e.hasCursor && e.cursorCol == 2);
+    CHECK_THROWS(expandBody("", ""));
+    CHECK_THROWS(expandBody("$0 $0", ""));
+    CHECK_THROWS(expandBody("a\rb", ""));
+}
+
+static void testSnippetFiles() {
+    section("Snippets: save / load, bad files");
+    const std::string path = "engine_snip_tmp.txt";
+    SnippetTable a;
+    a.add("fn", "void $0() {\n\treturn;\n}");
+    a.add("back", "path C:\\dir\\n $$ done");                                          // backslash and "\n" text survive
+    a.add("tab", "a\tb");
+    a.add("dollar", "$$5");
+    IOResult r = a.saveToFile(path);
+    CHECK(r.ok);
+    SnippetTable b;
+    r = b.loadFromFile(path);
+    CHECK(r.ok && b.size() == 4);
+    CHECK(b.find("fn") && b.find("fn")->body == a.find("fn")->body);
+    CHECK(b.find("back") && b.find("back")->body == a.find("back")->body);
+    CHECK(b.find("tab") && b.find("tab")->body == "a\tb" && b.find("dollar")->body == "$$5");
+    // full defaults round trip
+    SnippetTable d, d2;
+    d.loadDefaults();
+    CHECK(d.saveToFile(path).ok && d2.loadFromFile(path).ok && d2.size() == d.size());
+    DynArray<std::string> k = d.triggers();
+    bool ok = true;
+    for (size_t i = 0; i < k.size(); ++i) ok = ok && d2.find(k[i]) && d2.find(k[i])->body == d.find(k[i])->body;
+    CHECK(ok);
+
+    // messy file: BOM, CRLF, comments, blank lines, bad lines
+    {
+        std::ofstream f(path.c_str(), std::ios::binary);
+        f << "\xEF\xBB\xBF# comment\r\n\r\ngood\tvalue $0\r\n"
+             "no tab here\r\n"            // no TAB
+             "1bad\tbody\r\n"             // bad trigger
+             "two\ta $0 b $0\r\n"         // two cursors
+             "esc\tbad \\q escape\r\n"    // bad escape
+             "end\tlast line without newline";
+    }
+    SnippetTable m;
+    r = m.loadFromFile(path);
+    CHECK(r.ok && m.size() == 2 && m.find("good") && m.find("good")->body == "value $0");
+    CHECK(m.find("end") && m.find("end")->body == "last line without newline");
+    CHECK(r.message.find("Skipped 4") != std::string::npos && r.message.find("line 4") != std::string::npos);
+    // a file over the limit is refused and changes nothing
+    {
+        std::ofstream f(path.c_str(), std::ios::binary);
+        for (int i = 0; i < 40000; ++i) f << "x" << i << "\t" << std::string(30, 'b') << "\n";
+    }
+    SnippetTable big;
+    big.add("keep", "me");
+    r = big.loadFromFile(path);
+    CHECK(!r.ok && big.size() == 1 && big.find("keep"));
+    // empty file is fine, zero snippets
+    { std::ofstream f(path.c_str(), std::ios::binary); }
+    SnippetTable e;
+    r = e.loadFromFile(path);
+    CHECK(r.ok && e.size() == 0);
+    std::remove(path.c_str());
+    // errors: nothing is thrown, and the table is unchanged
+    SnippetTable x;
+    x.add("keep", "me");
+    CHECK(!x.loadFromFile("").ok && !x.loadFromFile("no_such_dir/no_such_file.txt").ok && x.size() == 1);
+    CHECK(!x.saveToFile("").ok && !x.saveToFile("no_such_dir/out.txt").ok);
+    CHECK(!x.loadFromFile(".").ok && x.size() == 1);                                   // a folder is not a snippet file
+}
+
+static std::string allText(const Editor& e) { return text(e.doc()); }
+
+static void testApplySnippet() {
+    section("Snippets: applySnippet through the Editor (one undo step)");
+    SnippetTable s;
+    s.loadDefaults();
+    Editor ed;
+    ed.insertText(Pos{0, 0}, "for");
+    size_t steps = ed.undoCount();
+    SnippetExpansion r = applySnippet(ed, s, Pos{0, 3});
+    CHECK(r.expanded && r.trigger == "for" && r.cursor == (Pos{0, 20}));
+    CHECK(allText(ed) == "for (int i = 0; i < ; ++i) {\n    \n}");
+    CHECK(ed.undoCount() == steps + 1 && ed.nextUndoLabel() == "snippet");
+    CHECK(ed.undo() && allText(ed) == "for" && ed.redo() && ed.doc().lineCount() == 3);
+    CHECK(ed.undo() && allText(ed) == "for");
+
+    // indentation of the current line is added to the following lines; text after the trigger stays
+    Editor e2;
+    e2.insertText(Pos{0, 0}, "void f() {\n    if rest");
+    r = applySnippet(e2, s, Pos{1, 6});
+    CHECK(r.expanded && e2.doc().getLine(1) == "    if () {" && e2.doc().getLine(2) == "        " && e2.doc().getLine(3) == "    } rest");   // text after the trigger follows the last body line
+    CHECK(r.cursor == (Pos{1, 8}));
+    // the cursor lands on $0, also on a later line
+    Editor e3;
+    e3.insertText(Pos{0, 0}, "\t\tmain");
+    r = applySnippet(e3, s, Pos{0, 6});
+    CHECK(r.expanded && r.cursor == (Pos{1, 6}) && e3.doc().getLine(1) == "\t\t    " && e3.doc().getLine(0) == "\t\tint main() {");
+    // inserting at the cursor reported really is valid and typing continues there
+    e3.insertText(r.cursor, "X");
+    CHECK(e3.doc().getLine(1) == "\t\t    X");
+
+    // not expanded -> nothing changes, nothing is recorded
+    Editor e4;
+    e4.insertText(Pos{0, 0}, "xfor foo  for_ for");
+    steps = e4.undoCount();
+    const std::string snap = allText(e4);
+    r = applySnippet(e4, s, Pos{0, 4});                                  // "xfor" is not a snippet
+    CHECK(!r.expanded && r.trigger == "xfor" && !r.reason.empty());
+    r = applySnippet(e4, s, Pos{0, 8});                                  // "foo"
+    CHECK(!r.expanded && r.trigger == "foo");
+    r = applySnippet(e4, s, Pos{0, 9});                                  // blank before the cursor
+    CHECK(!r.expanded && r.trigger.empty());
+    r = applySnippet(e4, s, Pos{0, 0});                                  // start of line
+    CHECK(!r.expanded && r.trigger.empty());
+    r = applySnippet(e4, s, Pos{0, 14});                                 // "for_" is not "for"
+    CHECK(!r.expanded && r.trigger == "for_");
+    r = applySnippet(e4, s, Pos{0, 16});                                 // after "for": cursor in the middle of the word "for"? no: "f" "or"
+    CHECK(!r.expanded);
+    CHECK(allText(e4) == snap && e4.undoCount() == steps);
+    r = applySnippet(e4, s, Pos{0, 18});                                 // the last "for" does expand
+    CHECK(r.expanded && e4.doc().getLine(0).compare(0, 17, "xfor foo  for_ fo") == 0);
+    // bad cursor -> exception, nothing changes
+    Editor e5;
+    e5.insertText(Pos{0, 0}, "if");
+    steps = e5.undoCount();
+    CHECK_THROWS(applySnippet(e5, s, Pos{4, 0}));
+    CHECK_THROWS(applySnippet(e5, s, Pos{0, 3}));
+    CHECK(allText(e5) == "if" && e5.undoCount() == steps);
+    // empty document, empty table
+    Editor e6;
+    CHECK(!applySnippet(e6, s, Pos{0, 0}).expanded && e6.doc().isEmpty());
+    SnippetTable none;
+    CHECK(!applySnippet(ed, none, Pos{0, 3}).expanded && allText(ed) == "for");
+    // a very long word is simply "not a snippet"
+    Editor e7;
+    e7.insertText(Pos{0, 0}, std::string(5000, 'a'));
+    r = applySnippet(e7, s, Pos{0, 5000});
+    CHECK(!r.expanded && !r.reason.empty() && e7.doc().charCount() == 5000);
+    // a replaced snippet body is used at once; a removed one stops working
+    Editor e8;
+    e8.insertText(Pos{0, 0}, "hi");
+    s.add("hi", "hello $0!");
+    r = applySnippet(e8, s, Pos{0, 2});
+    CHECK(r.expanded && allText(e8) == "hello !" && r.cursor == (Pos{0, 6}));
+    e8.undo();
+    s.remove("hi");
+    CHECK(!applySnippet(e8, s, Pos{0, 2}).expanded && allText(e8) == "hi");
+    CHECK(ed.doc().checkInvariants() && e2.doc().checkInvariants() && e3.doc().checkInvariants() && e4.doc().checkInvariants());
+}
+
+static void testSnippetRandomEditing() {
+    section("Snippets: random expand / undo / redo keeps the document consistent");
+    unsigned seed = 777;
+    auto rnd = [&seed]() { seed = seed * 1103515245u + 12345u; return (seed >> 8) & 0xFFFFFF; };
+    SnippetTable s;
+    s.loadDefaults();
+    DynArray<std::string> keys = s.triggers();
+    Editor ed;
+    bool consistent = true;
+    for (int round = 0; round < 400 && consistent; ++round) {
+        // type a trigger (maybe indented) at the end of a random line, then expand it
+        size_t line = rnd() % ed.doc().lineCount();
+        size_t len = ed.doc().lineLength(line);
+        std::string pad = (len > 0 ? " " : "") + ((rnd() % 2) ? std::string(rnd() % 6, ' ') : std::string(rnd() % 3, '\t'));
+        std::string trig = keys[rnd() % keys.size()];
+        Pos at = ed.insertText(Pos{line, len}, pad + trig);
+        std::string before = allText(ed);
+        SnippetExpansion r = applySnippet(ed, s, at);
+        consistent = consistent && r.expanded && ed.doc().checkInvariants();
+        if (r.expanded) {
+            consistent = consistent && r.cursor.line < ed.doc().lineCount() && r.cursor.col <= ed.doc().lineLength(r.cursor.line);
+            std::string after = allText(ed);
+            ed.undo();
+            consistent = consistent && allText(ed) == before;
+            ed.redo();
+            consistent = consistent && allText(ed) == after;
+        }
+        if (ed.doc().charCount() > 20000) ed.newDocument();
+    }
+    CHECK(consistent && ed.doc().checkInvariants());
+}
+
 
 int main() {
     testDynArray();
@@ -1565,6 +1950,16 @@ int main() {
     testAssistRankingThreshold();
     testAssistRandomRanking();
     testApplyCompletion();
+    testHashTableBasics();
+    testHashTableCollisions();
+    testHashTableRandom();
+    testHashTableLarge();
+    testSnippetRules();
+    testSnippetDefaults();
+    testExpandBody();
+    testSnippetFiles();
+    testApplySnippet();
+    testSnippetRandomEditing();
 
     std::cout << "\n" << (g_checks - g_failed) << "/" << g_checks << " checks passed";
     if (g_failed) std::cout << "  (" << g_failed << " FAILED)";
