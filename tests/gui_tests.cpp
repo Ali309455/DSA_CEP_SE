@@ -8,6 +8,9 @@
 #include <QTemporaryDir>
 #include <random>
 #include "CodeEditor.h"
+#include "FileExplorer.h"
+#include <QTreeView>
+#include <QFileSystemModel>
 #include "FindBar.h"
 #include "MainWindow.h"
 #include "RunManager.h"
@@ -435,6 +438,115 @@ private slots:
             QVERIFY2(e.toPlainText() == final, qPrintable(QString("seed %1: after redo-all text differs\nexpected=%2\n     got=%3\nundo/redo left: %4/%5")
                      .arg(seed).arg(final.toHtmlEscaped(), e.toPlainText().toHtmlEscaped()).arg(e.engine().undoCount()).arg(e.engine().redoCount())));
         }
+    }
+
+
+    void explorerNameValidation() {
+        QString why;
+        QVERIFY(FileExplorer::validName("main.cpp", &why));
+        QVERIFY(FileExplorer::validName("my file (1).txt", &why));
+        for (const char* bad : {"", "  ", ".", "..", "a/b", "a\\b", "a:b", "a*b", "a?b", "a<b", "a|b", "a\"b", "end.", "end ", "CON", "nul.txt", "COM1"}) {
+            QVERIFY2(!FileExplorer::validName(bad, &why), bad);
+            QVERIFY(!why.isEmpty());
+        }
+        QVERIFY(!FileExplorer::validName(QString(300, 'a'), &why));
+    }
+
+    void explorerFileOperations() {
+        QTemporaryDir td;
+        QVERIFY(td.isValid());
+        FileExplorer x;
+        QString err, p;
+        QVERIFY2(x.setRootPath(td.path(), &err), qPrintable(err));
+        QVERIFY(x.createFile(td.path(), "a.cpp", &err, &p));
+        QVERIFY(QFileInfo(p).isFile());
+        QVERIFY(!x.createFile(td.path(), "a.cpp", &err));            // already exists
+        QVERIFY(err.contains("exists"));
+        QVERIFY(!x.createFile(td.path(), "bad/name", &err));
+        QVERIFY(!x.createFile(td.filePath("nope"), "x.txt", &err));  // folder missing
+        QVERIFY(x.createFolder(td.path(), "src", &err, &p));
+        QVERIFY(QFileInfo(p).isDir());
+        QVERIFY(!x.createFolder(td.path(), "src", &err));
+        QVERIFY(x.createFile(td.filePath("src"), "b.cpp", &err));
+        // rename file and folder
+        QString np;
+        QVERIFY(x.renamePath(td.filePath("a.cpp"), "z.cpp", &err, &np));
+        QVERIFY(QFileInfo(np).isFile() && !QFileInfo(td.filePath("a.cpp")).exists());
+        QVERIFY(!x.renamePath(td.filePath("z.cpp"), "src", &err));   // name taken
+        QVERIFY(!x.renamePath(td.filePath("missing.cpp"), "q.cpp", &err));
+        QVERIFY(x.renamePath(td.filePath("z.cpp"), "z.cpp", &err));  // same name: no-op, no error
+        QVERIFY(x.renamePath(td.filePath("src"), "lib", &err, &np));
+        QVERIFY(QFileInfo(td.filePath("lib/b.cpp")).isFile());
+        QVERIFY(!x.renamePath(td.path(), "other", &err));            // not the opened folder itself
+        // delete (permanent here; the UI uses the trash)
+        QVERIFY(x.removePath(td.filePath("z.cpp"), false, &err));
+        QVERIFY(!QFileInfo(td.filePath("z.cpp")).exists());
+        QVERIFY(x.removePath(td.filePath("lib"), false, &err));      // folder with content
+        QVERIFY(!QFileInfo(td.filePath("lib")).exists());
+        QVERIFY(!x.removePath(td.filePath("gone"), false, &err));
+        QVERIFY(!x.removePath(td.path(), false, &err));              // never the root
+        QVERIFY(QFileInfo(td.path()).isDir());
+    }
+
+    void explorerRootErrorsAndSignals() {
+        QTemporaryDir td;
+        FileExplorer x;
+        QString err;
+        QVERIFY(!x.setRootPath("", &err));
+        QVERIFY(!x.setRootPath(td.filePath("missing"), &err));
+        QVERIFY(x.createFile(td.path(), "f.txt", &err));
+        QVERIFY(!x.setRootPath(td.filePath("f.txt"), &err));         // a file, not a folder
+        QVERIFY(x.rootPath().isEmpty());
+        QSignalSpy opened(&x, &FileExplorer::fileActivated);
+        QVERIFY(x.setRootPath(td.path(), &err));
+        QCOMPARE(x.rootPath(), QDir::cleanPath(td.path()));
+        x.activate(td.filePath("f.txt"));
+        QCOMPARE(opened.count(), 1);
+        x.activate(td.filePath("ghost.txt"));                        // deleted meanwhile: message, no signal
+        QCOMPARE(opened.count(), 1);
+        QSignalSpy closed(&x, &FileExplorer::rootChanged);
+        x.clearRoot();
+        QCOMPARE(closed.count(), 1);
+        QVERIFY(x.rootPath().isEmpty());
+    }
+
+    void explorerShowsFolderContent() {
+        QTemporaryDir td;
+        QVERIFY(QDir(td.path()).mkdir("sub"));
+        QFile f(td.filePath("hello.cpp"));
+        QVERIFY(f.open(QIODevice::WriteOnly));
+        f.close();
+        FileExplorer x;
+        QVERIFY(x.setRootPath(td.path()));
+        auto* m = qobject_cast<QFileSystemModel*>(x.tree()->model());
+        QVERIFY(m);
+        QTRY_VERIFY_WITH_TIMEOUT(m->rowCount(x.tree()->rootIndex()) == 2, 5000);   // sub + hello.cpp
+    }
+
+    void mainWindowOpensFolderAndFiles() {
+        QTemporaryDir td;
+        QFile f(td.filePath("one.cpp"));
+        QVERIFY(f.open(QIODevice::WriteOnly));
+        f.write("int one;\n");
+        f.close();
+        MainWindow w;
+        QVERIFY(w.openFolder(td.path(), true));
+        QVERIFY(!w.openFolder(td.filePath("nope"), true));           // bad folder: false, old one stays
+        QCOMPARE(w.explorer()->rootPath(), QDir::cleanPath(td.path()));
+        emit w.explorer()->fileActivated(td.filePath("one.cpp"));    // what a double click does
+        QCOMPARE(w.editor()->toPlainText(), QString("int one;"));
+        // rename the open file in the explorer: the editor follows the new name
+        QString err, np;
+        QVERIFY(w.explorer()->renamePath(td.filePath("one.cpp"), "two.cpp", &err, &np));
+        emit w.explorer()->fileRenamed(td.filePath("one.cpp"), np);
+        QCOMPARE(QFileInfo(w.editor()->filePath()).fileName(), QString("two.cpp"));
+        // delete it: the text stays, the document becomes untitled and modified
+        QVERIFY(w.explorer()->removePath(np, false, &err));
+        emit w.explorer()->pathRemoved(np);
+        QVERIFY(w.editor()->filePath().isEmpty());
+        QVERIFY(w.editor()->isModified());
+        QCOMPARE(w.editor()->toPlainText(), QString("int one;"));
+        w.editor()->newDocument();                                   // avoid the save prompt on exit
     }
 
     void mainWindowSmoke() {

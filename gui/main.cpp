@@ -1,4 +1,4 @@
-// DevPad - Qt front end (phase 5). Usage: devpad [file.cpp]
+// DevPad - Qt front end (phase 5). Usage: devpad [file.cpp | folder]
 #include <QApplication>
 #include <QFileInfo>
 #include "MainWindow.h"
@@ -9,7 +9,10 @@ int main(int argc, char** argv) {
     QCoreApplication::setApplicationName("DevPad");
     MainWindow w;
     const QStringList args = QCoreApplication::arguments();
-    if (args.size() > 1) w.openPath(args.at(1));
+    if (args.size() > 1) {
+        if (QFileInfo(args.at(1)).isDir()) w.openFolder(args.at(1));   // devpad some\folder
+        else w.openPath(args.at(1));
+    }
     w.show();
     return app.exec();
 }

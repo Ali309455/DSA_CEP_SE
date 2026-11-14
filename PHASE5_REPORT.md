@@ -13,6 +13,7 @@ A Qt Widgets code editor ("DevPad") compiled through CMake. **All text operation
 | Autocomplete (pops up while typing, Ctrl+Space) | Trie of C++ words + Trie of the words in your file; Enter / Tab accepts (one undo step) |
 | Snippets (type `for`, `if`, `main`... then Tab) | hash table; `$0` cursor marker; keeps indentation; Edit > Manage Snippets (add / remove / import / export, shows bucket count + longest chain) |
 | Run button (F5), Stop (Shift+F5), Build only (F7) | compiles the buffer with g++ / clang++ (C++17), shows output, clickable errors, stdin box, Stop kills runaway programs |
+| Explorer sidebar (File > Open Folder, Ctrl+Shift+O; Ctrl+B hides it) | folder tree like VS Code: double click opens a file, right click: New File / New Folder / Rename (F2) / Delete (to Trash) / Copy Path / Show in File Manager / Show Hidden Files; the editor follows renames and deletes; the last folder is reopened at start; `devpad <folder>` opens a folder |
 | Look | Midnight (dark) / Daylight (light) themes, C++ syntax colours, line numbers, current-line highlight, zoom (Ctrl+wheel, Ctrl +/-), word wrap, auto-indent, auto-close brackets/quotes, Ctrl+/ comment, Ctrl+Shift+D duplicate line |
 | View > Engine inspector | live numbers: lines, undo/redo depth, bracket pairs, trie sizes, hash-table buckets (good screenshots for the report) |
 
@@ -61,12 +62,12 @@ cmake --build build && ./build/devpad
 ```bash
 ctest --test-dir build --output-on-failure        # runs engine_tests and gui_tests
 ./build/engine_tests                               # 13 214 checks (phases 1-4 + snippets + phase-5 additions)
-QT_QPA_PLATFORM=offscreen ./build/gui_tests        # 27 headless GUI tests (no window needed)
+QT_QPA_PLATFORM=offscreen ./build/gui_tests        # 32 headless GUI tests (no window needed)
 ```
 Windows PowerShell: `$env:QT_QPA_PLATFORM="offscreen"; .\build\gui_tests.exe`
 Deeper random test: `GUI_FUZZ_SEEDS=300 ./build/gui_tests fuzzWidgetEngineStayInSync` (120 000 random actions: typing, emoji, paste, cut, Tab, Enter, undo, redo; after every action the widget text must equal the engine text).
 
-Results on the delivery machine: `engine_tests` 13214/13214, `gui_tests` 27/27, fuzz 300 seeds x 400 actions with no divergence.
+Results on the delivery machine: `engine_tests` 13214/13214, `gui_tests` 32/32, fuzz 300 seeds x 400 actions with no divergence.
 
 ### Manual checklist (5 minutes, good for screenshots)
 1. Start `devpad`. Type `#include <iostream>` + `int main() {` + Enter -> braces close and indent by themselves.
@@ -79,6 +80,7 @@ Results on the delivery machine: `engine_tests` 13214/13214, `gui_tests` 27/27, 
 8. Open a binary file / a folder / a file you cannot read -> a clear message, nothing breaks.
 9. Write a program, press F5 -> output panel. Introduce a typo, F5 -> error appears in Problems, double click jumps to the line. Write `while(true){}`, F5, then Shift+F5 stops it.
 10. View > Theme > Daylight; View > Engine inspector.
+11. File > Open Folder: pick your project. Double click a file to open it, right click > New File, Rename (F2), Delete. Rename the open file: the title follows. Delete it: the text stays and Save asks for a name.
 
 ## 4. Errors that are handled
 
@@ -100,7 +102,7 @@ Results on the delivery machine: `engine_tests` 13214/13214, `gui_tests` 27/27, 
 
 ## 5. Files
 
-**New:** `gui/*` (CodeEditor, CppHighlighter, FindBar, MainWindow, RunManager, SnippetDialog, TextUtil.h, Theme.h, main.cpp), `tests/gui_tests.cpp`, `PHASE5_REPORT.md`, `TESTING_QUICKSTART.md`.
+**New:** `gui/*` (CodeEditor, FileExplorer, CppHighlighter, FindBar, MainWindow, RunManager, SnippetDialog, TextUtil.h, Theme.h, main.cpp), `tests/gui_tests.cpp`, `PHASE5_REPORT.md`, `TESTING_QUICKSTART.md`.
 **Moved (git mv) and fixed:** `next_part_snippets/{HashTable.h,Snippets.h,Snippets.cpp}` -> `engine/` (they did not compile: `DynArray::resize` was missing).
 **Edited (old code kept, small additive changes):** `engine/DynArray.h` (+`resize`), `engine/Editor.h/.cpp` (+`loadText`, `markSaved`, `inGroup`), `engine/Assist.h/.cpp` (`refresh(doc, skipAt)` optional argument), `CMakeLists.txt` (Snippets + GUI + tests), `tests/test_main.cpp` (+2 test functions), `README.md`.
 

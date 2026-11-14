@@ -5,6 +5,7 @@
 #include <QApplication>
 #include <QCloseEvent>
 #include <QDockWidget>
+#include <QDir>
 #include <QDragEnterEvent>
 #include <QFileDialog>
 #include <QFileInfo>
@@ -26,10 +27,26 @@
 #include <QTreeWidget>
 #include <QVBoxLayout>
 #include "CodeEditor.h"
+#include "FileExplorer.h"
 #include "FindBar.h"
 #include "RunManager.h"
 #include "SnippetDialog.h"
 #include "TextUtil.h"
+
+// Path comparison that ignores '\\' vs '/' and (on Windows) upper / lower case.
+static Qt::CaseSensitivity pathCase() {
+#ifdef Q_OS_WIN
+    return Qt::CaseInsensitive;
+#else
+    return Qt::CaseSensitive;
+#endif
+}
+static bool samePath(const QString& a, const QString& b) {
+    return !a.isEmpty() && !b.isEmpty() && QDir::cleanPath(a).compare(QDir::cleanPath(b), pathCase()) == 0;
+}
+static bool isInside(const QString& path, const QString& folder) {
+    return QDir::cleanPath(path).startsWith(QDir::cleanPath(folder) + QLatin1Char('/'), pathCase());
+}
 
 MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     setAcceptDrops(true);
@@ -47,6 +64,34 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     lay->addWidget(editor_, 1);
     lay->addWidget(find_);
     setCentralWidget(central);
+
+    // ---- left sidebar: Explorer (folder tree)
+    explorer_ = new FileExplorer(this);
+    explorerDock_ = new QDockWidget(tr("Explorer"), this);
+    explorerDock_->setObjectName("explorerDock");
+    explorerDock_->setWidget(explorer_);
+    addDockWidget(Qt::LeftDockWidgetArea, explorerDock_);
+    resizeDocks({explorerDock_}, {240}, Qt::Horizontal);
+    connect(explorer_, &FileExplorer::fileActivated, this, [this](const QString& p) {
+        if (samePath(p, editor_->filePath())) { editor_->setFocus(); return; }
+        if (maybeSave()) openPath(p);
+    });
+    connect(explorer_, &FileExplorer::openFolderRequested, this, [this] { chooseFolder(); });
+    connect(explorer_, &FileExplorer::message, this, [this](const QString& m) { statusBar()->showMessage(m, 4000); });
+    connect(explorer_, &FileExplorer::fileRenamed, this, [this](const QString& from, const QString& to) {
+        const QString cur = editor_->filePath();
+        if (cur.isEmpty()) return;
+        if (samePath(cur, from)) editor_->setFilePath(to);                                   // the open file was renamed
+        else if (isInside(cur, from)) editor_->setFilePath(to + cur.mid(from.size()));       // a parent folder was renamed
+    });
+    connect(explorer_, &FileExplorer::pathRemoved, this, [this](const QString& gone) {
+        const QString cur = editor_->filePath();
+        if (!cur.isEmpty() && (samePath(cur, gone) || isInside(cur, gone))) {
+            editor_->setFilePath(QString());                  // text stays in the editor; Save asks for a new name
+            editor_->markDirty();
+            statusBar()->showMessage(tr("The open file was deleted; its text is still here. Save to keep it."), 8000);
+        }
+    });
 
     // ---- bottom panel: Problems + Output
     tabs_ = new QTabWidget(this);
@@ -98,6 +143,9 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     insDock->toggleViewAction()->setText(tr("Engine inspector"));
     dock->toggleViewAction()->setText(tr("Problems / Output panel"));
     menuBar()->actions().at(2)->menu()->addSeparator();
+    explorerDock_->toggleViewAction()->setText(tr("Explorer"));
+    explorerDock_->toggleViewAction()->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_B));
+    menuBar()->actions().at(2)->menu()->addAction(explorerDock_->toggleViewAction());
     menuBar()->actions().at(2)->menu()->addAction(dock->toggleViewAction());
     menuBar()->actions().at(2)->menu()->addAction(insDock->toggleViewAction());
 
@@ -154,6 +202,8 @@ void MainWindow::buildMenus() {
     QMenu* f = menuBar()->addMenu(tr("&File"));
     act(f, tr("&New"), QKeySequence::New, [this] { fileNew(); });
     act(f, tr("&Open..."), QKeySequence::Open, [this] { fileOpen(); });
+    act(f, tr("Open &Folder..."), QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_O), [this] { chooseFolder(); });
+    act(f, tr("&Close Folder"), QKeySequence(), [this] { explorer_->clearRoot(); });
     recentMenu_ = f->addMenu(tr("Open &Recent"));
     f->addSeparator();
     saveA_ = act(f, tr("&Save"), QKeySequence::Save, [this] { fileSave(); });
@@ -346,15 +396,33 @@ bool MainWindow::openPath(const QString& path, bool silent) {
         return false;
     }
     addRecent(path);
+    explorer_->setCurrentFile(editor_->filePath());
     problems_->clear();
     compilerItems_.clear();
     statusBar()->showMessage(r.message, 3000);
     return true;
 }
 
+bool MainWindow::openFolder(const QString& dir, bool silent) {
+    QString err;
+    if (!explorer_->setRootPath(dir, &err)) {
+        if (!silent) QMessageBox::warning(this, tr("Open Folder"), err);
+        return false;
+    }
+    explorerDock_->show();
+    explorer_->setCurrentFile(editor_->filePath());
+    statusBar()->showMessage(tr("Opened folder '%1'.").arg(QDir::toNativeSeparators(explorer_->rootPath())), 3000);
+    return true;
+}
+
+void MainWindow::chooseFolder() {
+    const QString d = QFileDialog::getExistingDirectory(this, tr("Open Folder"), explorer_->rootPath());
+    if (!d.isEmpty()) openFolder(d);
+}
+
 void MainWindow::fileOpen() {
     if (!maybeSave()) return;
-    const QString p = QFileDialog::getOpenFileName(this, tr("Open file"), QString(),
+    const QString p = QFileDialog::getOpenFileName(this, tr("Open file"), explorer_->rootPath(),
                                                    tr("C++ and text files (*.cpp *.cc *.cxx *.h *.hpp *.c *.txt *.md);;All files (*)"));
     if (!p.isEmpty()) openPath(p);
 }
@@ -371,7 +439,9 @@ bool MainWindow::fileSave() {
 }
 
 bool MainWindow::fileSaveAs() {
-    const QString start = editor_->filePath().isEmpty() ? QStringLiteral("untitled.cpp") : editor_->filePath();
+    const QString start = editor_->filePath().isEmpty()
+        ? QDir(explorer_->rootPath().isEmpty() ? QDir::currentPath() : explorer_->rootPath()).filePath(QStringLiteral("untitled.cpp"))
+        : editor_->filePath();
     const QString p = QFileDialog::getSaveFileName(this, tr("Save as"), start, tr("C++ files (*.cpp *.h *.hpp);;All files (*)"));
     if (p.isEmpty()) return false;
     QString err;
@@ -380,6 +450,7 @@ bool MainWindow::fileSaveAs() {
         return false;
     }
     addRecent(p);
+    explorer_->setCurrentFile(p);
     statusBar()->showMessage(tr("Saved '%1'.").arg(p), 3000);
     return true;
 }
@@ -490,6 +561,8 @@ void MainWindow::loadSettings() {
     restoreGeometry(s.value("geometry").toByteArray());
     restoreState(s.value("state").toByteArray());
     rebuildRecentMenu();
+    const QString folder = s.value("folder").toString();
+    if (!folder.isEmpty() && QFileInfo(folder).isDir()) explorer_->setRootPath(folder);   // silently skip if it vanished
     // user snippets (problems are reported, never fatal)
     if (QFileInfo::exists(snippetFile())) {
         const IOResult r = editor_->snippets().loadFromFile(TextUtil::toStd(snippetFile()));
@@ -502,6 +575,7 @@ void MainWindow::saveSettings() {
     s.setValue("theme", themeName_);
     s.setValue("flags", compilerFlags_);
     s.setValue("recent", recent_);
+    s.setValue("folder", explorer_->rootPath());
     s.setValue("fontSize", editor_->font().pointSize());
     s.setValue("wrap", wrapA_->isChecked());
     s.setValue("autoClose", autoCloseA_->isChecked());

@@ -83,7 +83,7 @@ if(BUILD_GUI)
     message(STATUS "Qt GUI enabled (${QT_NS})")
     set(CMAKE_AUTOMOC ON)
     add_library(devpad_gui STATIC
-      gui/CodeEditor.cpp gui/CppHighlighter.cpp gui/FindBar.cpp gui/MainWindow.cpp
+      gui/CodeEditor.cpp gui/CppHighlighter.cpp gui/FileExplorer.cpp gui/FindBar.cpp gui/MainWindow.cpp
       gui/RunManager.cpp gui/SnippetDialog.cpp)
     target_include_directories(devpad_gui PUBLIC gui)
     target_link_libraries(devpad_gui PUBLIC engine ${QT_NS}::Widgets)

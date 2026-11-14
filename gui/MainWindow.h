@@ -5,6 +5,8 @@
 
 class CodeEditor;
 class FindBar;
+class FileExplorer;
+class QDockWidget;
 class RunManager;
 class QAction;
 class QLabel;
@@ -23,7 +25,9 @@ public:
     CodeEditor* editor() const { return editor_; }
     FindBar* findBar() const { return find_; }
     RunManager* runner() const { return run_; }
-    bool openPath(const QString& path, bool silent = false);   // false on failure (message shown unless silent)
+    bool openPath(const QString& path, bool silent = false);
+    bool openFolder(const QString& dir, bool silent = false);   // show it in the Explorer sidebar
+    FileExplorer* explorer() const { return explorer_; }   // false on failure (message shown unless silent)
     bool maybeSave();                                          // false = user cancelled
     void applyTheme(const QString& name);
     QString snippetFile() const;
@@ -43,12 +47,15 @@ private slots:
     void refreshInspector();
     void runClicked();
     void goToLineDialog();
+    void chooseFolder();
     void nextProblem();
 
 private:
     CodeEditor* editor_;
     FindBar* find_;
     RunManager* run_;
+    FileExplorer* explorer_;
+    QDockWidget* explorerDock_;
     QTabWidget* tabs_;
     QTreeWidget* problems_;
     QPlainTextEdit* output_;

@@ -55,6 +55,8 @@ public:
     bool saveFile(const QString& path, QString* error);
     void newDocument();
     QString filePath() const { return filePath_; }
+    void setFilePath(const QString& p) { filePath_ = p; emit stateChanged(); }   // file renamed on disk
+    void markDirty() { lossy_ = true; emit stateChanged(); }                     // file deleted on disk: unsaved
     QString displayName() const;
     bool isModified() const { return ed_.doc().modified() || lossy_; }
 
