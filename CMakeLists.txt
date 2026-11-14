@@ -45,6 +45,31 @@ add_test(NAME engine_tests COMMAND engine_tests)
 # ---- Phase 5: Qt GUI (DevPad). Needs Qt 6 (or Qt 5.15) Widgets. Turn off with -DBUILD_GUI=OFF ----
 option(BUILD_GUI "Build the Qt GUI (phase 5)" ON)
 if(BUILD_GUI)
+  # Find a Qt installed by the Qt installer without the user passing -DCMAKE_PREFIX_PATH.
+  # (A path you pass yourself, or the CMAKE_PREFIX_PATH / QTDIR environment variables, win.)
+  set(_qt_roots C:/Qt D:/Qt E:/Qt "$ENV{USERPROFILE}/Qt" "$ENV{HOME}/Qt" /opt/Qt)
+  if(WIN32 AND CMAKE_CXX_COMPILER_ID STREQUAL "MSVC")
+    set(_qt_kits msvc2022_64 msvc2019_64)
+  elseif(WIN32)
+    set(_qt_kits mingw_64)
+  elseif(APPLE)
+    set(_qt_kits macos)
+  else()
+    set(_qt_kits gcc_64)
+  endif()
+  set(_qt_found "")
+  foreach(_root IN LISTS _qt_roots)
+    foreach(_kit IN LISTS _qt_kits)
+      file(GLOB _cands "${_root}/6.*/${_kit}")
+      list(APPEND _qt_found ${_cands})
+    endforeach()
+  endforeach()
+  if(_qt_found)
+    list(SORT _qt_found COMPARE NATURAL ORDER DESCENDING)     # newest Qt first
+    list(GET _qt_found 0 _qt_best)
+    list(APPEND CMAKE_PREFIX_PATH "${_qt_best}")
+    message(STATUS "Qt search path added automatically: ${_qt_best}")
+  endif()
   find_package(Qt6 COMPONENTS Widgets Test QUIET)
   if(Qt6_FOUND)
     set(QT_NS Qt6)
@@ -65,6 +90,16 @@ if(BUILD_GUI)
 
     add_executable(devpad WIN32 gui/main.cpp)
     target_link_libraries(devpad PRIVATE devpad_gui)
+
+    if(WIN32)   # copy the Qt DLLs next to devpad.exe (best effort, never fails the build)
+      find_program(WINDEPLOYQT NAMES windeployqt6 windeployqt
+                   HINTS "${CMAKE_PREFIX_PATH}/bin" "${Qt6_DIR}/../../../bin" "${Qt5_DIR}/../../../bin")
+      get_filename_component(_cxx_dir "${CMAKE_CXX_COMPILER}" DIRECTORY)
+      add_custom_command(TARGET devpad POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -DTOOL=${WINDEPLOYQT} -DEXE=$<TARGET_FILE:devpad> -DCOMPILER_DIR=${_cxx_dir}
+                -P ${CMAKE_SOURCE_DIR}/cmake/DeployQt.cmake
+        VERBATIM)
+    endif()
 
     if(TARGET ${QT_NS}::Test)
       add_executable(gui_tests tests/gui_tests.cpp)

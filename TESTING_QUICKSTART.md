@@ -26,3 +26,17 @@ Requirements: `g++` and `cmake` (and `ninja` for the first form) on PATH - easie
 If you use the Qt installer's MinGW kit instead, add `-DCMAKE_PREFIX_PATH=C:/Qt/<version>/mingw_64` and put
 `C:/Qt/Tools/mingw<version>_64/bin` and `C:/Qt/<version>/mingw_64/bin` on PATH.
 If you delete `build/` first when switching generators: a folder configured with NMake cannot be reused.
+
+## Windows with the Qt installer (no Qt Creator, no PATH, no Qt path)
+If Qt and its MinGW compiler were installed to `C:\Qt` by the Qt installer, CMake now finds Qt by itself
+(it searches `C:\Qt\6.*\mingw_64`, newest first) and the `qt` preset puts the compiler on PATH for you.
+In an ordinary Command Prompt, inside the project folder:
+```
+rmdir /s /q build
+cmake --preset qt
+cmake --build build
+build\devpad.exe
+```
+The Qt DLLs are copied next to `devpad.exe` after the build, so the exe also starts by double click.
+Needs the Qt installer's `Tools\mingw1310_64` and `Tools\Ninja`; if your compiler folder has another name,
+edit the two `mingw1310_64` entries in `CMakePresets.json` (the `qt` preset).
