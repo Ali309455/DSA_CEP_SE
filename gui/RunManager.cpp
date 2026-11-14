@@ -51,11 +51,11 @@ void RunManager::buildAndRun(const QString& source, const QString& baseName, con
     QString base = baseName.isEmpty() ? QStringLiteral("untitled") : baseName;
     if (!(base.endsWith(".cpp") || base.endsWith(".cc") || base.endsWith(".cxx"))) base += ".cpp";
     srcName_ = QDir(dir_->path()).filePath(base);
-    exePath_ = QDir(dir_->path()).filePath(QStringLiteral("program")
+    QString exeName = QStringLiteral("program");
 #ifdef Q_OS_WIN
-                                           ".exe"
+    exeName += QStringLiteral(".exe");
 #endif
-    );
+    exePath_ = QDir(dir_->path()).filePath(exeName);
     QFile f(srcName_);
     if (!f.open(QIODevice::WriteOnly) || f.write(source.toUtf8()) < 0) {
         emit output(tr("Cannot write the temporary source file: %1\n").arg(f.errorString()), true);
