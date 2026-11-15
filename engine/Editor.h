@@ -37,6 +37,24 @@ public:
     // One undo step (a delete and an insert grouped together).
     Pos replaceRange(Pos a, Pos b, const std::string& text);
 
+    // ---- typing runs (phase 5) ----
+    // A GUI sends one call per key press. If every key press were its own undo step,
+    // "Undo" would remove one letter at a time and the 100-step history would hold
+    // only a few words. These two merge a run of key presses into ONE step:
+    //
+    //   typeText      : consecutive insertions merge while each one starts exactly where
+    //                   the previous ended AND is the same kind of character
+    //                   (letters/digits/_ , blanks, other). So "hello world" = 3 steps.
+    //   eraseCoalescing: consecutive single-line deletions merge when each one touches the
+    //                   previous (Backspace runs and Delete runs).
+    //
+    // Any other edit, undo, redo, open or breakTyping() ends the run. Use breakTyping()
+    // when the cursor is moved by the user. The merged step is still one Command, so
+    // memory stays O(characters typed) and Undo stays one stack move.
+    Pos typeText(Pos at, const std::string& text);
+    std::string eraseCoalescing(Pos a, Pos b);
+    void breakTyping() { run_ = Run::None; }
+
     // ---- search and replace (KMP, see Search.h) ----
     // Reading only: use findAll / findNext from Search.h with doc().
     //
@@ -71,9 +89,11 @@ public:
 
     // ---- undo / redo ----
     // Return false when there is nothing to undo / redo. If 'label' is given it
-    // receives the name of the step that was undone / redone.
-    bool undo(std::string* label = nullptr);
-    bool redo(std::string* label = nullptr);
+    // receives the name of the step that was undone / redone. If 'where' is given it
+    // receives the position where the cursor belongs afterwards (the end of the text
+    // that was put back, or the place where inserted text was removed / re-inserted).
+    bool undo(std::string* label = nullptr, Pos* where = nullptr);
+    bool redo(std::string* label = nullptr, Pos* where = nullptr);
     bool canUndo() const { return um_.canUndo(); }
     bool canRedo() const { return um_.canRedo(); }
     size_t undoCount() const { return um_.undoCount(); }
@@ -87,6 +107,10 @@ public:
     void newDocument();
     IOResult open(const std::string& path);
     IOResult save(const std::string& path);
+    // Rename the file this document was opened from / saved to (a new NAME in the same
+    // folder). The text and the history are untouched. Fails, changing nothing, if the
+    // document has no file yet, the name is invalid, or the target exists (see FileIO.h).
+    IOResult renameFile(const std::string& newName);
 
 private:
     Document doc_;
@@ -95,9 +119,16 @@ private:
     Group pending_;     // the group being collected
     size_t failAfter_ = 0;   // test hook, see injectFailureForTesting
 
+    // State of the current typing run (see typeText / eraseCoalescing).
+    enum class Run { None, Typing, Erase };
+    Run run_ = Run::None;
+    Pos runPos_;              // Typing: where the next key press would go. Erase: start of the merged deletion.
+    int runClass_ = 0;        // Typing: kind of the last typed character
+    size_t runCount_ = 0;     // undo steps when the run was last extended (safety check)
+
     void record(CmdType type, Pos start, Pos end, const std::string& text, const char* label);
-    void apply(const Command& c);     // do the command
-    void reverse(const Command& c);   // do its opposite
+    Pos apply(const Command& c);      // do the command; returns where the cursor belongs afterwards
+    Pos reverse(const Command& c);    // do its opposite; same
 };
 
 // Opens a group in the constructor and closes it in the destructor, so the

@@ -44,6 +44,7 @@ void Document::resetToOneLine() {
 
 void Document::clear() {
     resetToOneLine();
+    crlf_ = false;
     path_.clear();
     modified_ = false;
 }

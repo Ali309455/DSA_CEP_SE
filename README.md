@@ -1,7 +1,7 @@
 # TextEditor - CS-218 DSA Complex Engineering Problem
 
 A text editor in C++ where the text engine is built from our own data structures.
-The GUI (later phase) is a thin layer on top; all editing logic lives in `engine/`.
+The GUI (DevPad, Qt Widgets) is a thin layer on top; all editing logic lives in `engine/`.
 
 ## Status
 
@@ -12,7 +12,7 @@ The GUI (later phase) is a thin layer on top; all editing logic lives in `engine
 | **3** | KMP search (find all, locations), replace one / replace all, whole-word / ignore-case | **done** |
 | **4a** | Bracket checker (stack), Trie autocomplete | **done** |
 | 4b | Hash-table snippets | next part (draft files in `next_part_snippets/`, not built yet) |
-| 5 | Dear ImGui + GLFW window: custom text rendering, menus, themes, Run button | |
+| **5** | **DevPad**: Qt Widgets GUI built with CMake - multi-tab editing, line move / copy, auto-pairs and wrapping selections in `() [] {} "" ''`, Ctrl+Tab, Quick Open, rename file, find / replace, file tree | **done** |
 | 6 | Report, complexity table, screenshots | |
 
 ## Build (Windows, MSYS2 MinGW64 shell)
@@ -25,7 +25,23 @@ cmake --build build
 ./build/console_editor.exe    # try the editor
 ```
 Linux / macOS: same, without `-G Ninja` if you prefer Makefiles.
-No internet or extra libraries are needed in phase 1.
+No extra libraries are needed for the engine, tests and console editor.
+
+### DevPad (phase 5, Qt GUI)
+
+Needs Qt 6 (Qt 5.15 also works). With CMake, point it at your Qt install:
+
+```
+# Windows (MSYS2):  pacman -S mingw-w64-x86_64-qt6-base
+# Linux (Debian):   sudo apt install qt6-base-dev
+# Windows (Qt installer): add  -DCMAKE_PREFIX_PATH=C:/Qt/6.x.x/mingw_64
+cmake -S . -B build -G Ninja
+cmake --build build
+./build/devpad [file-or-folder ...]
+ctest --test-dir build          # engine tests + headless GUI tests
+```
+If Qt is not found the GUI is skipped and everything else still builds; `-DBUILD_GUI=OFF` skips it on purpose.
+On Windows run `windeployqt build/devpad.exe` once to copy the Qt DLLs next to the program.
 
 ## Layout
 
@@ -41,8 +57,14 @@ engine/Brackets.h/cpp bracket checker: stack scan, skips strings / comments, rec
 engine/Trie.h/cpp     prefix tree: insert / remove / weights / top-k completion (own code, no std::map)
 engine/Assist.h/cpp   autocomplete (keywords trie + document-words trie), applyCompletion through the Editor
 engine/FileIO.h/cpp   open / save / save-as, errors returned not thrown
+engine/EditOps.h/cpp  code-editor commands: move / duplicate / indent / comment lines, auto-pair, wrap selection, smart Enter
+engine/Workspace.h/cpp folder listing + fuzzy file search (Quick Open)
+gui/CodeView.h/cpp    the text area: custom-painted Qt widget on top of Editor (no QTextDocument)
+gui/MainWindow.h/cpp  tabs, menus, shortcuts, find bar, Quick Open, file tree, rename
+gui/main.cpp          entry point
 app/console_main.cpp  command-line front end (1-based line/column numbers)
 tests/test_main.cpp   test suite incl. random stress test against a model
+tests/gui_test.cpp    headless GUI tests: real key presses against the real widgets
 ```
 
 ## Design (phase 1)
@@ -195,6 +217,38 @@ otherwise `m` doubles. (A brute-force comparison runs in the tests.)
 
 Console: `brackets`, `match <l> <c>`, `complete <prefix>` / `complete <l> <c>`,
 `accept <l> <c> <word>`, `dictadd <word>`, `dictdel <word>`.
+
+## DevPad - phase 5 (Qt GUI)
+
+Every edit still goes through `Editor`, so undo / redo, KMP search, the bracket checker and the Trie
+autocomplete are the code from phases 1-4, not Qt's. `CodeView` only draws the `Document` and turns
+key presses into engine calls.
+
+### Keyboard shortcuts (Help > Keyboard Shortcuts, F1)
+
+| Area | Keys |
+|---|---|
+| Tabs | `Ctrl+Tab` / `Ctrl+Shift+Tab` next / previous (also `Ctrl+PgDn` / `Ctrl+PgUp`), `Alt+1`..`Alt+9` go to tab (`Alt+9` = last), `Ctrl+N` new, `Ctrl+W` close |
+| Files | `Ctrl+P` fuzzy file search ("mw" finds `MainWindow.cpp`), `F2` rename file, `Ctrl+O` open, `Ctrl+Shift+O` open folder, `Ctrl+S` / `Ctrl+Shift+S` / `Ctrl+Alt+S` save / save as / save all, `Ctrl+B` sidebar |
+| Lines | `Alt+Up` / `Alt+Down` move line (or all selected lines), `Shift+Alt+Up` / `Shift+Alt+Down` copy line up / down (`Ctrl+D` copy down), `Ctrl+Shift+K` delete line, `Ctrl+Enter` / `Ctrl+Shift+Enter` new line below / above, `Ctrl+]` / `Ctrl+[` indent / outdent, `Ctrl+/` toggle comment, `Ctrl+L` select line |
+| Brackets, quotes | with text selected type `(` `[` `{` `"` `'` `` ` `` to wrap it (selection stays on the text); typing an opener adds the closer, typing the closer steps over it, Backspace between an empty pair removes both |
+| Typing | smart Enter keeps the indent and opens a block between `{ }`; Tab / Shift+Tab indent / outdent selected lines; Backspace in leading spaces goes back one tab stop; `Home` jumps to the first non-blank character first |
+| Search | `Ctrl+F` find, `Ctrl+H` replace, `F3` / `Shift+F3` next / previous, `Ctrl+G` go to line, `Ctrl+Space` autocomplete |
+| Edit | `Ctrl+Z`, `Ctrl+Y` / `Ctrl+Shift+Z`, cut / copy / paste (copy or cut with nothing selected takes the whole line), `Ctrl+Wheel` / `Ctrl+=` / `Ctrl+-` zoom |
+
+### Where the data structures are used
+
+| Feature | Data structure / algorithm | Cost |
+|---|---|---|
+| Text | doubly linked list of lines with a cursor cache | line access O(distance from the last line used) |
+| Undo / redo | two stacks of command records; a run of key presses is merged into one record (`typeText`, `eraseCoalescing`) | O(1) per key press, O(size of the step) per undo |
+| Move / copy lines, comment, indent, wrap in `()`, smart Enter | one `EditGroup` each, so every command is exactly one undo step | O(characters in the lines touched) |
+| Find / replace | KMP | O(n + m) |
+| Bracket status bar, matching-bracket highlight | stack scan, rerun 250 ms after the last edit | O(n) |
+| Autocomplete popup | Trie (dictionary + words of the document) | O(prefix + k) |
+| Ctrl+P file search | dynamic-programming subsequence score, top-k kept in a small sorted array | O(files x query x name length), never sorts the whole list |
+| Rename file | validates the name (no folders, no Windows-forbidden characters, never overwrites), keeps text and undo history | O(1) |
+| Line endings | the engine text has no `\r`; CRLF files are written back as CRLF | O(n) on open / save |
 
 ## Complexity (phase 1)
 

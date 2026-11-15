@@ -30,6 +30,10 @@ public:
     size_t undoCount() const { return undo_.size(); }
     size_t redoCount() const { return redo_.size(); }
 
+    // The newest undo step, for merging a run of typing into it (see Editor::typeText).
+    Group& topUndo() { return undo_.top(); }
+    void clearRedo() { redo_.clear(); }
+
     const std::string& nextUndoLabel() const { return undo_.top().label; }
     const std::string& nextRedoLabel() const { return redo_.top().label; }
 

@@ -77,6 +77,11 @@ public:
     // ---- file bookkeeping ----
     const std::string& path() const { return path_; }
     void setPath(const std::string& p) { path_ = p; }
+    // Line endings of the file. The text itself never contains '\r'; if the file had
+    // Windows line endings (CRLF) this is true and saving writes them back, so opening and
+    // saving a file does not rewrite every line ending. A new / cleared document is false (LF).
+    bool crlf() const { return crlf_; }
+    void setCrlf(bool v) { crlf_ = v; }
     bool modified() const { return modified_; }
     void markSaved() { modified_ = false; }
 
@@ -93,6 +98,7 @@ private:
     mutable size_t cacheIdx_;  // its line number
     std::string path_;
     bool modified_;
+    bool crlf_ = false;
 
     Node* nodeAt(size_t line) const;     // O(min(line, n-line, |line-cache|))
     void checkPos(Pos p) const;

@@ -18,10 +18,12 @@ add_library(engine STATIC
   engine/Assist.cpp
   engine/Brackets.cpp
   engine/Document.cpp
+  engine/EditOps.cpp
   engine/Editor.cpp
   engine/FileIO.cpp
   engine/Search.cpp
-  engine/Trie.cpp)
+  engine/Trie.cpp
+  engine/Workspace.cpp)
 target_include_directories(engine PUBLIC engine)
 
 # ---- Console test suite (use its output as evidence in the report) ----
@@ -42,4 +44,36 @@ enable_testing()
 add_test(NAME engine_tests COMMAND engine_tests)
 
 # Snippets (hash table) are in next_part_snippets/ and join the build in part 4b.
-# The GUI (Dear ImGui + GLFW) is added in a later phase.
+
+# ---- Phase 5: DevPad, the Qt Widgets GUI (Qt 6, or Qt 5 as a fallback) ----
+# Configure with -DBUILD_GUI=OFF to build only the engine, the tests and the console editor.
+option(BUILD_GUI "Build the Qt GUI (DevPad)" ON)
+if(BUILD_GUI)
+  find_package(QT NAMES Qt6 Qt5 COMPONENTS Widgets QUIET)
+  if(QT_FOUND)
+    find_package(Qt${QT_VERSION_MAJOR} REQUIRED COMPONENTS Widgets)
+    message(STATUS "DevPad GUI: building with Qt ${QT_VERSION}")
+    add_executable(devpad WIN32
+      gui/main.cpp
+      gui/MainWindow.cpp
+      gui/MainWindow.h
+      gui/CodeView.cpp
+      gui/CodeView.h)
+    set_target_properties(devpad PROPERTIES AUTOMOC ON)
+    target_include_directories(devpad PRIVATE gui)
+    target_link_libraries(devpad PRIVATE engine Qt${QT_VERSION_MAJOR}::Widgets)
+
+    # GUI smoke tests: drive the real widgets without a screen (QT_QPA_PLATFORM=offscreen)
+    find_package(Qt${QT_VERSION_MAJOR} QUIET COMPONENTS Test)
+    if(Qt${QT_VERSION_MAJOR}Test_FOUND)
+      add_executable(gui_tests tests/gui_test.cpp gui/MainWindow.cpp gui/MainWindow.h gui/CodeView.cpp gui/CodeView.h)
+      set_target_properties(gui_tests PROPERTIES AUTOMOC ON)
+      target_include_directories(gui_tests PRIVATE gui)
+      target_link_libraries(gui_tests PRIVATE engine Qt${QT_VERSION_MAJOR}::Widgets Qt${QT_VERSION_MAJOR}::Test)
+      add_test(NAME gui_tests COMMAND gui_tests)
+      set_tests_properties(gui_tests PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+    endif()
+  else()
+    message(STATUS "DevPad GUI: Qt not found - skipping (install Qt 6 and set CMAKE_PREFIX_PATH, or use -DBUILD_GUI=OFF)")
+  endif()
+endif()

@@ -4,7 +4,10 @@
 #include <cstdio>
 #include <cctype>
 #include <cstdlib>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
+#include <iterator>
 #include <string>
 
 #include <map>
@@ -14,9 +17,11 @@
 #include "Trie.h"
 #include "DynArray.h"
 #include "Document.h"
+#include "EditOps.h"
 #include "Editor.h"
 #include "FileIO.h"
 #include "Stack.h"
+#include "Workspace.h"
 
 static int g_checks = 0;
 static int g_failed = 0;
@@ -305,6 +310,25 @@ static void testFiles() {
     r = saveFile(keep, "no_such_folder_12345/x.txt");
     CHECK(!r.ok && keep.getLine(0) == "keep me");
 
+    // Windows line endings survive open + save (the text itself never holds '\r')
+    {
+        const std::string crlfPath = "engine_test_crlf_tmp.txt";
+        { std::ofstream o(crlfPath, std::ios::binary); o << "one\r\ntwo\r\n\r\nfour"; }
+        Document w;
+        CHECK(openFile(w, crlfPath).ok && w.crlf());
+        CHECK(w.lineCount() == 4 && w.getLine(0) == "one" && w.getLine(2).empty());
+        CHECK(saveFile(w, crlfPath).ok);
+        std::ifstream i(crlfPath, std::ios::binary);
+        std::string back((std::istreambuf_iterator<char>(i)), std::istreambuf_iterator<char>());
+        CHECK(back == "one\r\ntwo\r\n\r\nfour\r\n");
+        i.close();
+        { std::ofstream o(crlfPath, std::ios::binary); o << "a\nb\n"; }
+        CHECK(openFile(w, crlfPath).ok && !w.crlf());       // LF file stays LF
+        w.setCrlf(true);
+        w.clear();
+        CHECK(!w.crlf());                                   // a cleared document is LF again
+        std::remove(crlfPath.c_str());
+    }
     std::remove(path.c_str());
 }
 
@@ -1524,6 +1548,596 @@ static void testApplyCompletion() {
 }
 
 
+// ------------------------------------------------------------------ phase 5: typing runs
+
+static void testTypingRuns() {
+    section("Typing runs: key presses merge into undo steps");
+    {
+        Editor e;
+        Pos p{0, 0};
+        const std::string s = "hello world";
+        for (size_t i = 0; i < s.size(); ++i) p = e.typeText(p, std::string(1, s[i]));
+        CHECK(text(e.doc()) == "hello world");
+        CHECK(e.undoCount() == 3);                         // "hello", " ", "world"
+        Pos where;
+        CHECK(e.undo(nullptr, &where));
+        CHECK(text(e.doc()) == "hello " && where == (Pos{0, 6}));
+        CHECK(e.undo());
+        CHECK(text(e.doc()) == "hello");
+        CHECK(e.undo());
+        CHECK(text(e.doc()).empty() && !e.canUndo());
+        CHECK(e.redo(nullptr, &where));
+        CHECK(text(e.doc()) == "hello" && where == (Pos{0, 5}));
+        CHECK(e.redo() && e.redo());
+        CHECK(text(e.doc()) == "hello world");
+    }
+    {   // a gap, another kind of edit, or breakTyping() starts a new step
+        Editor e;
+        Pos p = e.typeText(Pos{0, 0}, "a");
+        p = e.typeText(p, "b");
+        CHECK(e.undoCount() == 1);
+        e.breakTyping();
+        p = e.typeText(p, "c");
+        CHECK(e.undoCount() == 2 && text(e.doc()) == "abc");
+        e.insertText(Pos{0, 3}, "!");                      // an ordinary edit ends the run
+        p = e.typeText(Pos{0, 4}, "d");
+        CHECK(e.undoCount() == 4);
+        p = e.typeText(Pos{0, 0}, "z");                    // not where the last key press ended
+        CHECK(e.undoCount() == 5 && text(e.doc()) == "zabc!d");
+        p = e.typeText(Pos{0, 1}, "y");                    // contiguous again, same class: merges
+        CHECK(e.undoCount() == 5 && text(e.doc()) == "zyabc!d");
+        e.undo();
+        CHECK(text(e.doc()) == "abc!d");
+        e.typeText(Pos{0, 5}, "e");                        // after an undo a run never continues
+        CHECK(text(e.doc()) == "abc!de" && e.undoCount() == 5 && !e.canRedo());
+        e.undo(); e.undo(); e.undo(); e.undo(); e.undo();
+        CHECK(text(e.doc()).empty() && !e.canUndo());
+    }
+    {   // kinds of characters: letters+digits, blanks, other
+        Editor e;
+        Pos p{0, 0};
+        const std::string s = "ab1  (( x";
+        for (size_t i = 0; i < s.size(); ++i) p = e.typeText(p, std::string(1, s[i]));
+        CHECK(e.undoCount() == 5);                         // "ab1", "  ", "((", " ", "x"
+    }
+    {   // multi-character and line-break input
+        Editor e;
+        Pos p = e.typeText(Pos{0, 0}, "foo");
+        p = e.typeText(p, "bar");                          // same class, contiguous: merges
+        CHECK(e.undoCount() == 1);
+        p = e.typeText(p, "a b");                          // mixed classes: its own step, ends the run
+        p = e.typeText(p, "c");
+        CHECK(e.undoCount() == 3);
+        p = e.typeText(p, "\n");
+        CHECK(text(e.doc()) == "foobara bc\n" && e.undoCount() == 4);
+        CHECK(e.typeText(p, "").line == p.line);
+        CHECK_THROWS(e.typeText(Pos{9, 0}, "x"));
+        CHECK(e.undoCount() == 4);
+    }
+    {   // inside a group nothing is merged
+        Editor e;
+        Pos p = e.typeText(Pos{0, 0}, "a");
+        e.beginGroup("g");
+        p = e.typeText(p, "b");
+        e.endGroup();
+        CHECK(e.undoCount() == 2);
+        e.undo();
+        CHECK(text(e.doc()) == "a");
+    }
+    {   // erase runs
+        Editor e;
+        e.insertText(Pos{0, 0}, "abcdefgh");
+        e.breakTyping();
+        for (int i = 0; i < 3; ++i) {                      // Backspace x3 from the end
+            size_t c = e.doc().lineLength(0);
+            e.eraseCoalescing(Pos{0, c - 1}, Pos{0, c});
+        }
+        CHECK(text(e.doc()) == "abcde" && e.undoCount() == 2);
+        Pos where;
+        e.undo(nullptr, &where);
+        CHECK(text(e.doc()) == "abcdefgh" && where == (Pos{0, 8}));
+        e.redo(nullptr, &where);
+        CHECK(text(e.doc()) == "abcde" && where == (Pos{0, 5}));
+        e.undo();
+        for (int i = 0; i < 3; ++i) e.eraseCoalescing(Pos{0, 2}, Pos{0, 3});   // Delete x3 at column 2
+        CHECK(text(e.doc()) == "abfgh" && e.undoCount() == 2);
+        e.undo();
+        CHECK(text(e.doc()) == "abcdefgh");
+        e.redo();
+        CHECK(text(e.doc()) == "abfgh");
+        e.eraseCoalescing(Pos{0, 0}, Pos{0, 1});           // not touching the last deletion: new step
+        CHECK(text(e.doc()) == "bfgh" && e.undoCount() == 3);
+        CHECK_THROWS(e.eraseCoalescing(Pos{0, 0}, Pos{5, 0}));
+        CHECK(text(e.doc()) == "bfgh" && e.undoCount() == 3);
+        CHECK(e.eraseCoalescing(Pos{0, 1}, Pos{0, 1}).empty() && e.undoCount() == 3);   // empty range
+        // a multi-line delete is its own step and ends the run
+        Editor f;
+        f.insertText(Pos{0, 0}, "ab\ncd");
+        f.eraseCoalescing(Pos{0, 1}, Pos{1, 1});
+        CHECK(text(f.doc()) == "ad" && f.undoCount() == 2);
+        f.undo();
+        CHECK(text(f.doc()) == "ab\ncd");
+    }
+}
+
+static void testTypingRandom() {
+    section("Typing runs: random stress against a model");
+    unsigned seed = 4711;
+    auto rnd = [&seed]() { seed = seed * 1664525u + 1013904223u; return seed >> 8; };
+    Editor e;
+    e.setHistoryLimit(1000000);
+    std::string model;
+    size_t cur = 0;
+    const char alphabet[] = "ab1 (_";
+    for (int step = 0; step < 4000; ++step) {
+        unsigned k = rnd() % 10;
+        if (k < 5) {                                       // type a character at the cursor
+            char c = alphabet[rnd() % 6];
+            e.typeText(Pos{0, cur}, std::string(1, c));
+            model.insert(cur, 1, c);
+            ++cur;
+        } else if (k < 7 && cur > 0) {                     // Backspace
+            e.eraseCoalescing(Pos{0, cur - 1}, Pos{0, cur});
+            model.erase(cur - 1, 1);
+            --cur;
+        } else if (k < 8 && cur < model.size()) {          // Delete
+            e.eraseCoalescing(Pos{0, cur}, Pos{0, cur + 1});
+            model.erase(cur, 1);
+        } else if (k < 9) {                                // the user moves the cursor
+            cur = model.empty() ? 0 : rnd() % (model.size() + 1);
+            if (rnd() % 2) e.breakTyping();
+        } else {                                           // undo then redo must be a round trip
+            std::string before = model;
+            Pos w;
+            if (e.undo(nullptr, &w)) {
+                CHECK(e.redo());
+                CHECK(text(e.doc()) == before);
+            }
+        }
+        CHECK(text(e.doc()) == model);
+    }
+    const std::string finalText = model;
+    size_t steps = e.undoCount();
+    CHECK(steps < 4000);                                   // runs really were merged
+    while (e.undo()) {}
+    CHECK(text(e.doc()).empty());
+    while (e.redo()) {}
+    CHECK(text(e.doc()) == finalText);
+    CHECK(e.doc().checkInvariants());
+}
+
+static void testUndoWhere() {
+    section("Undo / redo report where the cursor belongs");
+    Editor e;
+    e.insertText(Pos{0, 0}, "one\ntwo\nthree");
+    Pos where;
+    e.deleteRange(Pos{0, 1}, Pos{2, 2});                   // "oree"
+    CHECK(text(e.doc()) == "oree");
+    CHECK(e.undo(nullptr, &where));
+    CHECK(text(e.doc()) == "one\ntwo\nthree" && where == (Pos{2, 2}));   // end of the restored text
+    CHECK(e.redo(nullptr, &where));
+    CHECK(where == (Pos{0, 1}));
+    e.undo();
+    e.undo(nullptr, &where);                               // the first insert is undone
+    CHECK(text(e.doc()).empty() && where == (Pos{0, 0}));
+    e.redo(nullptr, &where);
+    CHECK(where == (Pos{2, 5}));                           // just after the re-inserted text
+    e.replaceRange(Pos{0, 0}, Pos{0, 3}, "ONE!");
+    CHECK(e.undo(nullptr, &where) && where == (Pos{0, 3}));
+    CHECK(e.redo(nullptr, &where) && where == (Pos{0, 4}));
+    CHECK(!e.redo(nullptr, &where));
+    CHECK(e.undo());                                       // old calls without 'where' still work
+}
+
+// ------------------------------------------------------------------ phase 5: line commands
+
+static std::string joinLines(const std::vector<std::string>& v) {
+    std::string s;
+    for (size_t i = 0; i < v.size(); ++i) { if (i) s.push_back('\n'); s += v[i]; }
+    return s;
+}
+
+static void testMoveLines() {
+    section("EditOps: move / duplicate lines");
+    Editor e;
+    e.insertText(Pos{0, 0}, "a\nb\nc\nd");
+    e.breakTyping();
+    size_t base = e.undoCount();
+    CHECK(moveLines(e, 1, 1, -1));                         // b up
+    CHECK(text(e.doc()) == "b\na\nc\nd" && e.undoCount() == base + 1);
+    CHECK(!moveLines(e, 0, 0, -1));                        // already at the top
+    CHECK(text(e.doc()) == "b\na\nc\nd" && e.undoCount() == base + 1);
+    CHECK(moveLines(e, 1, 2, 1));                          // a,c down
+    CHECK(text(e.doc()) == "b\nd\na\nc");
+    CHECK(!moveLines(e, 2, 3, 1));                         // bottom
+    CHECK(!moveLines(e, 1, 1, 0));
+    CHECK_THROWS(moveLines(e, 2, 9, 1));
+    CHECK_THROWS(moveLines(e, 3, 2, 1));
+    CHECK(moveLines(e, 0, 3, -1) == false);
+    e.undo();
+    CHECK(text(e.doc()) == "b\na\nc\nd");                  // one Undo reverses one move
+    e.undo();
+    CHECK(text(e.doc()) == "a\nb\nc\nd");
+
+    Editor f;                                              // empty lines and long lines
+    f.insertText(Pos{0, 0}, "x\n\n  y  \n");
+    CHECK(f.doc().lineCount() == 4);
+    CHECK(moveLines(f, 1, 1, 1));
+    CHECK(text(f.doc()) == "x\n  y  \n\n");
+    CHECK(moveLines(f, 3, 3, -1));
+    CHECK(text(f.doc()) == "x\n  y  \n\n");                // swapping two empty lines
+    CHECK(f.doc().checkInvariants());
+
+    Editor d;
+    d.insertText(Pos{0, 0}, "p\nq\nr");
+    duplicateLines(d, 0, 1);
+    CHECK(text(d.doc()) == "p\nq\np\nq\nr");
+    d.undo();
+    CHECK(text(d.doc()) == "p\nq\nr");
+    duplicateLines(d, 2, 2);                               // the last line
+    CHECK(text(d.doc()) == "p\nq\nr\nr");
+    CHECK_THROWS(duplicateLines(d, 0, 9));
+}
+
+static void testMoveLinesRandom() {
+    section("EditOps: move lines random stress against a model");
+    unsigned seed = 31337;
+    auto rnd = [&seed]() { seed = seed * 1664525u + 1013904223u; return seed >> 8; };
+    Editor e;
+    e.setHistoryLimit(1000000);
+    std::vector<std::string> model;
+    for (int i = 0; i < 12; ++i) model.push_back("line " + std::to_string(i) + std::string(rnd() % 5, 'x'));
+    e.insertText(Pos{0, 0}, joinLines(model));
+    std::vector<std::string> start = model;
+    size_t steps0 = e.undoCount();
+    for (int step = 0; step < 600; ++step) {
+        size_t n = model.size();
+        size_t from = rnd() % n;
+        size_t to = from + rnd() % (n - from < 4 ? n - from : 4);
+        int dir = (rnd() % 2) ? 1 : -1;
+        bool expect = dir < 0 ? from > 0 : to + 1 < n;
+        bool did = moveLines(e, from, to, dir);
+        CHECK(did == expect);
+        if (did) {
+            std::vector<std::string> block(model.begin() + from, model.begin() + to + 1);
+            model.erase(model.begin() + from, model.begin() + to + 1);
+            size_t at = dir < 0 ? from - 1 : from + 1;
+            model.insert(model.begin() + at, block.begin(), block.end());
+        }
+        CHECK(text(e.doc()) == joinLines(model));
+    }
+    CHECK(e.doc().checkInvariants());
+    while (e.undoCount() > steps0) e.undo();
+    CHECK(text(e.doc()) == joinLines(start));
+}
+
+static std::string linesOf(const Editor& e) { return text(e.doc()); }
+
+static void testIndentAndComment() {
+    section("EditOps: indent / outdent / comment");
+    Editor e;
+    e.insertText(Pos{0, 0}, "a\n\n  b\n\tc");
+    DynArray<ColEdit> ed = indentLines(e, 0, 3, 4);
+    CHECK(linesOf(e) == "    a\n\n      b\n    \tc");
+    CHECK(ed.size() == 3);                                 // the empty line is skipped
+    e.undo();
+    CHECK(linesOf(e) == "a\n\n  b\n\tc");
+
+    ed = outdentLines(e, 0, 3, 4);                         // a: nothing; b: 2 spaces; c: one tab
+    CHECK(linesOf(e) == "a\n\nb\nc" && ed.size() == 2);
+    e.undo();
+    e.insertText(Pos{0, 0}, "        ");                   // 8 spaces before "a"
+    e.breakTyping();
+    ed = outdentLines(e, 0, 0, 4);
+    CHECK(linesOf(e).substr(0, 5) == "    a");
+    CHECK(outdentLines(e, 1, 1, 4).empty());               // nothing to remove: no history step
+    size_t before = e.undoCount();
+    indentLines(e, 1, 1, 4);                               // only an empty line
+    CHECK(e.undoCount() == before);
+
+    // adjustPos
+    DynArray<ColEdit> a1;
+    a1.push_back(ColEdit{2, 0, 4});
+    CHECK(adjustPos(Pos{2, 0}, a1) == (Pos{2, 4}));
+    CHECK(adjustPos(Pos{2, 7}, a1) == (Pos{2, 11}));
+    CHECK(adjustPos(Pos{1, 7}, a1) == (Pos{1, 7}));
+    DynArray<ColEdit> a2;
+    a2.push_back(ColEdit{0, 2, -3});
+    CHECK(adjustPos(Pos{0, 1}, a2) == (Pos{0, 1}));
+    CHECK(adjustPos(Pos{0, 3}, a2) == (Pos{0, 2}));        // inside the removed text
+    CHECK(adjustPos(Pos{0, 5}, a2) == (Pos{0, 2}));
+    CHECK(adjustPos(Pos{0, 9}, a2) == (Pos{0, 6}));
+
+    // comments
+    Editor c;
+    c.insertText(Pos{0, 0}, "int a;\n    int b;\n\n  // note\nint c;");
+    bool commented = false;
+    toggleLineComment(c, 0, 1, "//", &commented);
+    CHECK(commented && linesOf(c) == "// int a;\n//     int b;\n\n  // note\nint c;");
+    toggleLineComment(c, 0, 1, "//", &commented);
+    CHECK(!commented && linesOf(c) == "int a;\n    int b;\n\n  // note\nint c;");
+    c.undo();
+    CHECK(linesOf(c).substr(0, 9) == "// int a;");
+    c.undo();
+    CHECK(linesOf(c).substr(0, 6) == "int a;");
+    toggleLineComment(c, 1, 1, "//", &commented);          // keeps the indentation
+    CHECK(commented && c.doc().getLine(1) == "    // int b;");
+    toggleLineComment(c, 1, 4, "//", &commented);          // mixed: comment everything (blank skipped)
+    CHECK(commented);                                      // smallest indentation (0) is used for all
+    CHECK(c.doc().getLine(1) == "//     // int b;" && c.doc().getLine(3) == "//   // note");
+    CHECK(c.doc().getLine(4) == "// int c;");
+    CHECK(c.doc().getLine(2).empty());                     // blank line untouched
+    c.undo();
+    toggleLineComment(c, 3, 3, "//", &commented);          // "// note" without a space after
+    CHECK(!commented && c.doc().getLine(3) == "  note");
+    CHECK(toggleLineComment(c, 2, 2, "//", &commented).empty() && !commented);   // only a blank line
+    CHECK_THROWS(toggleLineComment(c, 0, 0, ""));
+    CHECK_THROWS(toggleLineComment(c, 0, 99));
+    Editor py;
+    py.insertText(Pos{0, 0}, "x = 1\ny = 2");
+    toggleLineComment(py, 0, 1, "#", &commented);
+    CHECK(commented && linesOf(py) == "# x = 1\n# y = 2");
+    toggleLineComment(py, 0, 1, "#", &commented);
+    CHECK(!commented && linesOf(py) == "x = 1\ny = 2");
+
+    // new lines above / below
+    Editor n;
+    n.insertText(Pos{0, 0}, "  foo {\nbar");
+    Pos p = insertLineBelow(n, 0, 4);
+    CHECK(linesOf(n) == "  foo {\n      \nbar" && p == (Pos{1, 6}));    // one level deeper after '{'
+    n.undo();
+    p = insertLineBelow(n, 1, 4);
+    CHECK(linesOf(n) == "  foo {\nbar\n" && p == (Pos{2, 0}));
+    n.undo();
+    p = insertLineAbove(n, 0, 4);
+    CHECK(linesOf(n) == "  \n  foo {\nbar" && p == (Pos{0, 2}));
+    n.undo();
+    CHECK(linesOf(n) == "  foo {\nbar");
+    CHECK_THROWS(insertLineBelow(n, 7));
+    CHECK_THROWS(insertLineAbove(n, 7));
+}
+
+// ------------------------------------------------------------------ phase 5: smart typing
+
+static void testSmartTyping() {
+    section("EditOps: auto pairs, surround, smart Enter");
+    CHECK(pairCloser('(') == ')' && pairCloser('[') == ']' && pairCloser('{') == '}');
+    CHECK(pairCloser('"') == '"' && pairCloser('\'') == '\'' && pairCloser('`') == '`');
+    CHECK(pairCloser('a') == 0 && pairCloser(')') == 0);
+
+    Document d;
+    d.insertText(Pos{0, 0}, "foo bar\nx = \nf(a)\ndon\n12\n");
+    CHECK(shouldAutoPair(d, Pos{1, 4}, '('));              // end of line
+    CHECK(shouldAutoPair(d, Pos{0, 3}, '('));              // before a blank
+    CHECK(!shouldAutoPair(d, Pos{0, 4}, '('));             // in front of a word
+    CHECK(shouldAutoPair(d, Pos{2, 3}, '['));              // before ')'
+    CHECK(shouldAutoPair(d, Pos{1, 4}, '"'));
+    CHECK(!shouldAutoPair(d, Pos{3, 3}, '\''));            // don't
+    CHECK(!shouldAutoPair(d, Pos{4, 2}, '\''));            // 12'
+    CHECK(!shouldAutoPair(d, Pos{0, 0}, 'a'));
+    Document q;
+    q.insertText(Pos{0, 0}, "\"\"");
+    CHECK(!shouldAutoPair(q, Pos{0, 1}, '"'));             // between "" : no third quote
+    CHECK(isEmptyPairAround(q, Pos{0, 1}));
+    Document b;
+    b.insertText(Pos{0, 0}, "()[]{} (x) ['] ");
+    CHECK(isEmptyPairAround(b, Pos{0, 1}) && isEmptyPairAround(b, Pos{0, 3}) && isEmptyPairAround(b, Pos{0, 5}));
+    CHECK(!isEmptyPairAround(b, Pos{0, 0}) && !isEmptyPairAround(b, Pos{0, 2}) && !isEmptyPairAround(b, Pos{0, 8}));
+    CHECK(!isEmptyPairAround(b, Pos{0, 15}));              // end of line
+
+    // surround
+    Editor e;
+    e.insertText(Pos{0, 0}, "alpha beta\ngamma");
+    e.breakTyping();
+    size_t steps = e.undoCount();
+    SelRange r = surroundSelection(e, Pos{0, 6}, Pos{0, 10}, '(');
+    CHECK(text(e.doc()) == "alpha (beta)\ngamma" && e.undoCount() == steps + 1);
+    CHECK(r.start == (Pos{0, 7}) && r.end == (Pos{0, 11}));
+    CHECK(e.doc().getRange(r.start, r.end) == "beta");
+    r = surroundSelection(e, r.start, r.end, '"');         // wrapping again keeps the selection on the text
+    CHECK(text(e.doc()) == "alpha (\"beta\")\ngamma");
+    CHECK(e.doc().getRange(r.start, r.end) == "beta");
+    e.undo(); e.undo();
+    CHECK(text(e.doc()) == "alpha beta\ngamma");
+    r = surroundSelection(e, Pos{1, 5}, Pos{0, 6}, '{'); // multi-line, reversed order
+    CHECK(text(e.doc()) == "alpha {beta\ngamma}");
+    CHECK(r.start == (Pos{0, 7}) && r.end == (Pos{1, 5}));
+    CHECK(e.doc().getRange(r.start, r.end) == "beta\ngamma");
+    e.undo();
+    steps = e.undoCount();
+    CHECK_THROWS(surroundSelection(e, Pos{0, 2}, Pos{0, 2}, '('));
+    CHECK_THROWS(surroundSelection(e, Pos{0, 2}, Pos{0, 4}, 'x'));
+    CHECK_THROWS(surroundSelection(e, Pos{0, 99}, Pos{0, 4}, '('));
+    CHECK_THROWS(surroundSelection(e, Pos{0, 2}, Pos{7, 0}, '('));
+    CHECK(text(e.doc()) == "alpha beta\ngamma" && e.undoCount() == steps);   // nothing half-done
+
+    // smart Enter
+    Editor n;
+    n.insertText(Pos{0, 0}, "    if (x) {");
+    Pos p = insertNewLineSmart(n, Pos{0, 12}, 4);
+    CHECK(text(n.doc()) == "    if (x) {\n        " && p == (Pos{1, 8}));
+    n.undo();
+    CHECK(text(n.doc()) == "    if (x) {");
+    n.breakTyping();
+    n.deleteChars(Pos{0, 11}, 1);                           // remove '{'
+    n.insertText(Pos{0, 11}, "{}");
+    p = insertNewLineSmart(n, Pos{0, 12}, 4);              // between { and }
+    CHECK(text(n.doc()) == "    if (x) {\n        \n    }" && p == (Pos{1, 8}));
+    n.undo();
+    CHECK(text(n.doc()) == "    if (x) {}");
+    p = insertNewLineSmart(n, Pos{0, 2}, 4);               // inside the indentation
+    CHECK(text(n.doc()) == "  \n  " "  if (x) {}" && p == (Pos{1, 2}));
+    n.undo();
+    p = insertNewLineSmart(n, Pos{0, 13}, 4);              // end of a line without an opener
+    CHECK(text(n.doc()) == "    if (x) {}\n    " && p == (Pos{1, 4}));
+    Editor t;
+    t.insertText(Pos{0, 0}, "f(");
+    p = insertNewLineSmart(t, Pos{0, 2}, 2);
+    CHECK(text(t.doc()) == "f(\n  " && p == (Pos{1, 2}));
+    CHECK_THROWS(insertNewLineSmart(t, Pos{0, 9}));
+    CHECK_THROWS(insertNewLineSmart(t, Pos{5, 0}));
+
+    CHECK(leadingWhitespace("  \t x") == "  \t ");
+    CHECK(leadingWhitespace("x").empty() && leadingWhitespace("").empty());
+    CHECK(smartHomeCol("    abc", 7) == 4);                // to the first non-blank
+    CHECK(smartHomeCol("    abc", 4) == 0);                // then to column 0
+    CHECK(smartHomeCol("    abc", 0) == 4);
+    CHECK(smartHomeCol("abc", 2) == 0 && smartHomeCol("abc", 0) == 0);
+}
+
+// ------------------------------------------------------------------ phase 5: workspace
+
+static void testFuzzy() {
+    section("Workspace: fuzzy score and ranking");
+    CHECK(fuzzyScore("", "anything") == 0);
+    CHECK(fuzzyScore("xyz", "main.cpp") == -1);
+    CHECK(fuzzyScore("maincppp", "main.cpp") == -1);       // longer than the candidate
+    CHECK(fuzzyScore("pcm", "main.cpp") == -1);            // letters in the wrong order
+    CHECK(fuzzyScore("MAIN", "main.cpp") >= 0);            // case does not matter
+    CHECK(fuzzyScore("m a i n", "main.cpp") == fuzzyScore("main", "main.cpp"));   // blanks ignored
+    CHECK(fuzzyScore("mw", "gui/MainWindow.cpp") > fuzzyScore("mw", "docs/memo_with_notes.txt"));
+    CHECK(fuzzyScore("main", "main.cpp") > fuzzyScore("main", "domain.cpp"));      // start beats middle
+    CHECK(fuzzyScore("edit", "engine/Editor.cpp") > fuzzyScore("edit", "tests/credits.txt"));
+    CHECK(fuzzyScore("ed.h", "engine/Editor.h") >= 0);
+    CHECK(fuzzyScore("gui/main", "gui\\main.cpp") >= 0);   // '\' counts as '/'
+    CHECK(fuzzyScore("a", "") == -1);
+
+    DynArray<std::string> files;
+    const char* names[] = {"README.md", "engine/Editor.cpp", "engine/Editor.h", "engine/EditOps.cpp",
+                           "gui/MainWindow.cpp", "gui/CodeEditor.cpp", "tests/test_main.cpp", "CMakeLists.txt"};
+    for (size_t i = 0; i < 8; ++i) files.push_back(names[i]);
+    DynArray<size_t> r = rankFiles(files, "editor", 3);
+    CHECK(r.size() == 3);
+    CHECK(files[r[0]] == "engine/Editor.h" || files[r[0]] == "engine/Editor.cpp" || files[r[0]] == "gui/CodeEditor.cpp");
+    bool onlyMatches = true;
+    for (size_t i = 0; i < r.size(); ++i) if (fuzzyScore("editor", files[r[i]]) < 0) onlyMatches = false;
+    CHECK(onlyMatches);
+    r = rankFiles(files, "mainwin", 5);
+    CHECK(r.size() == 1 && files[r[0]] == "gui/MainWindow.cpp");
+    r = rankFiles(files, "zzz", 5);
+    CHECK(r.empty());
+    r = rankFiles(files, "", 3);
+    CHECK(r.size() == 3 && r[0] == 0 && r[2] == 2);        // empty query: first ones, in order
+    CHECK(rankFiles(files, "e", 0).empty());
+    r = rankFiles(files, "cpp", 100);
+    CHECK(r.size() == 5);                                  // every .cpp file, nothing else
+
+    // top-k equals sorting everything (brute force)
+    unsigned seed = 99;
+    auto rnd = [&seed]() { seed = seed * 1664525u + 1013904223u; return seed >> 8; };
+    DynArray<std::string> many;
+    for (int i = 0; i < 300; ++i) {
+        std::string s;
+        int parts = 1 + rnd() % 3;
+        for (int p = 0; p < parts; ++p) {
+            int len = 2 + rnd() % 7;
+            for (int k = 0; k < len; ++k) s.push_back(static_cast<char>((rnd() % 4 == 0 ? 'A' : 'a') + rnd() % 6));
+            if (p + 1 < parts) s.push_back('/');
+        }
+        s += ".cpp";
+        many.push_back(s);
+    }
+    for (int round = 0; round < 40; ++round) {
+        std::string query;
+        int ql = 1 + rnd() % 3;
+        for (int k = 0; k < ql; ++k) query.push_back(static_cast<char>('a' + rnd() % 6));
+        size_t k = 1 + rnd() % 10;
+        DynArray<size_t> got = rankFiles(many, query, k);
+        std::vector<size_t> all;                           // brute force: all matches, bubble-sorted
+        for (size_t i = 0; i < many.size(); ++i) if (fuzzyScore(query, many[i]) >= 0) all.push_back(i);
+        for (size_t i = 0; i < all.size(); ++i)
+            for (size_t j = 0; j + 1 < all.size() - i; ++j) {
+                size_t x = all[j], y = all[j + 1];
+                int sx = fuzzyScore(query, many[x]), sy = fuzzyScore(query, many[y]);
+                bool swap = sx != sy ? sx < sy : (many[x].size() != many[y].size() ? many[x].size() > many[y].size() : many[x] > many[y]);
+                if (swap) { all[j] = y; all[j + 1] = x; }
+            }
+        size_t expect = all.size() < k ? all.size() : k;
+        CHECK(got.size() == expect);
+        for (size_t i = 0; i < got.size() && i < expect; ++i) CHECK(got[i] == all[i]);
+    }
+}
+
+static void testListFiles() {
+    section("Workspace: listing files");
+    namespace fs = std::filesystem;
+    const fs::path root = "engine_test_ws_tmp";
+    fs::remove_all(root);
+    fs::create_directories(root / "src" / "deep");
+    fs::create_directories(root / ".git");
+    fs::create_directories(root / "build");
+    fs::create_directories(root / "node_modules" / "pkg");
+    fs::create_directories(root / "cmake-build-debug");
+    auto touch = [&](const fs::path& p) { std::ofstream(p) << "x"; };
+    touch(root / "a.txt");
+    touch(root / "src" / "main.cpp");
+    touch(root / "src" / "deep" / "x.h");
+    touch(root / ".gitignore");
+    touch(root / ".git" / "config");
+    touch(root / "build" / "out.txt");
+    touch(root / "node_modules" / "pkg" / "i.js");
+    touch(root / "cmake-build-debug" / "c.txt");
+    touch(root / "logo.PNG");
+    touch(root / "tool.exe");
+
+    DynArray<std::string> f = listWorkspaceFiles(root.string());
+    auto has = [&](const std::string& s) { for (size_t i = 0; i < f.size(); ++i) if (f[i] == s) return true; return false; };
+    CHECK(f.size() == 4);
+    CHECK(has("a.txt") && has("src/main.cpp") && has("src/deep/x.h") && has(".gitignore"));
+    CHECK(!has(".git/config") && !has("build/out.txt") && !has("logo.PNG") && !has("tool.exe"));
+    CHECK(listWorkspaceFiles(root.string(), 2).size() == 2);   // the cap
+    CHECK(listWorkspaceFiles(root.string(), 0).empty());
+    CHECK(listWorkspaceFiles("no_such_folder_98765").empty());
+    CHECK(listWorkspaceFiles("").empty());
+    CHECK(listWorkspaceFiles((root / "a.txt").string()).empty());   // a file, not a folder
+    fs::remove_all(root);
+}
+
+static void testRenameFile() {
+    section("Rename file");
+    namespace fs = std::filesystem;
+    const fs::path root = "engine_test_rn_tmp";
+    fs::remove_all(root);
+    fs::create_directories(root);
+    auto touch = [&](const std::string& n, const char* c) { std::ofstream(root / n) << c; };
+    touch("one.txt", "1");
+    touch("two.txt", "2");
+    const std::string one = (root / "one.txt").generic_string();
+
+    std::string np;
+    IOResult r = renameFile(one, "uno.txt", &np);
+    CHECK(r.ok && np == (root / "uno.txt").generic_string());
+    CHECK(!fs::exists(root / "one.txt") && fs::exists(root / "uno.txt"));
+    r = renameFile(np, "two.txt");                         // would overwrite
+    CHECK(!r.ok && fs::exists(root / "uno.txt") && fs::exists(root / "two.txt"));
+    r = renameFile(np, "uno.txt");                         // same name
+    CHECK(r.ok);
+    r = renameFile(one, "x.txt");                          // the file is gone
+    CHECK(!r.ok);
+    const char* bad[] = {"", ".", "..", "a/b.txt", "a\\b.txt", "bad?.txt", "bad|name", "c:x", "x<y", "end.", "end ", "tab\there"};
+    for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); ++i) {
+        r = renameFile(np, bad[i]);
+        CHECK(!r.ok && fs::exists(root / "uno.txt"));
+    }
+    CHECK(!renameFile(np, std::string(300, 'a')).ok);
+    CHECK(!renameFile("", "x.txt").ok);
+    CHECK(!renameFile(root.generic_string(), "x.txt").ok); // a folder is not a file
+
+    // through the Editor: path changes, text and history do not
+    Editor e;
+    CHECK(!e.renameFile("x.txt").ok);                      // no file yet
+    CHECK(e.open((root / "two.txt").generic_string()).ok);
+    e.insertText(Pos{0, 1}, "!");
+    CHECK(e.doc().modified());
+    CHECK(e.renameFile("zwei.txt").ok);
+    CHECK(e.doc().path() == (root / "zwei.txt").generic_string());
+    CHECK(e.doc().modified() && text(e.doc()) == "2!" && e.canUndo());
+    CHECK(fs::exists(root / "zwei.txt") && !fs::exists(root / "two.txt"));
+    CHECK(!e.renameFile("uno.txt").ok && e.doc().path() == (root / "zwei.txt").generic_string());
+    CHECK(e.save(e.doc().path()).ok);
+    fs::remove_all(root);
+}
+
 int main() {
     testDynArray();
     testStack();
@@ -1565,6 +2179,16 @@ int main() {
     testAssistRankingThreshold();
     testAssistRandomRanking();
     testApplyCompletion();
+    testTypingRuns();
+    testTypingRandom();
+    testUndoWhere();
+    testMoveLines();
+    testMoveLinesRandom();
+    testIndentAndComment();
+    testSmartTyping();
+    testFuzzy();
+    testListFiles();
+    testRenameFile();
 
     std::cout << "\n" << (g_checks - g_failed) << "/" << g_checks << " checks passed";
     if (g_failed) std::cout << "  (" << g_failed << " FAILED)";

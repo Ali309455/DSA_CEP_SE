@@ -5,6 +5,7 @@
 // ---------------------------------------------------------------- recording
 
 void Editor::record(CmdType type, Pos start, Pos end, const std::string& text, const char* label) {
+    run_ = Run::None;                        // any ordinary edit ends a typing run
     Command c;
     c.type = type;
     c.start = start;
@@ -103,6 +104,83 @@ Pos Editor::replaceRange(Pos a, Pos b, const std::string& text) {
     return insertText(a, text);
 }
 
+// ---------------------------------------------------------------- typing runs
+
+// 0 = letter / digit / '_' (bytes >= 0x80 are parts of UTF-8 letters), 1 = blank, 2 = other.
+static int charClass(char c) {
+    unsigned char u = static_cast<unsigned char>(c);
+    if (u >= 0x80 || (u >= '0' && u <= '9') || (u >= 'a' && u <= 'z') || (u >= 'A' && u <= 'Z') || u == '_') return 0;
+    if (u == ' ' || u == '\t') return 1;
+    return 2;
+}
+
+// The one class shared by every character of 'text', or -1 if mixed / has a line break.
+static int uniformClass(const std::string& text) {
+    if (text.empty()) return -1;
+    int cls = charClass(text[0]);
+    for (size_t i = 0; i < text.size(); ++i) {
+        if (text[i] == '\n' || charClass(text[i]) != cls) return -1;
+    }
+    return cls;
+}
+
+Pos Editor::typeText(Pos at, const std::string& text) {
+    if (text.empty()) return at;
+    const int cls = uniformClass(text);
+    const bool merge = depth_ == 0 && cls >= 0 && run_ == Run::Typing && um_.canUndo() &&
+                       um_.undoCount() == runCount_ && at == runPos_ && cls == runClass_;
+    Pos end = doc_.insertText(at, text);     // throws if 'at' is invalid: nothing changed, nothing recorded
+    if (end == at) return end;
+    if (merge) {
+        Command& c = um_.topUndo().cmds[0];  // the run's single Insert command
+        c.text += text;
+        c.end = end;
+        um_.clearRedo();
+    } else {
+        record(CmdType::Insert, at, end, text, "typing");
+    }
+    if (depth_ == 0 && cls >= 0) {
+        run_ = Run::Typing;
+        runPos_ = end;
+        runClass_ = cls;
+        runCount_ = um_.undoCount();
+    } else {
+        run_ = Run::None;
+    }
+    return end;
+}
+
+std::string Editor::eraseCoalescing(Pos a, Pos b) {
+    if (b < a) { Pos t = a; a = b; b = t; }
+    const bool single = (a.line == b.line);
+    const bool chain = depth_ == 0 && single && run_ == Run::Erase && um_.canUndo() && um_.undoCount() == runCount_;
+    std::string removed = doc_.deleteRange(a, b);   // throws on a bad range: nothing recorded
+    if (removed.empty()) return removed;
+    bool merged = false;
+    if (chain) {
+        Command& c = um_.topUndo().cmds[0];          // the run's single Delete command
+        if (b == c.start) {                          // Backspace run: new text lies just before the old
+            c.start = a;
+            c.text = removed + c.text;
+            merged = true;
+        } else if (a == c.start) {                   // Delete run: new text was just after the old
+            c.end.col += removed.size();
+            c.text += removed;
+            merged = true;
+        }
+        if (merged) um_.clearRedo();
+    }
+    if (!merged) record(CmdType::Delete, a, b, removed, "delete");
+    if (depth_ == 0 && single) {
+        run_ = Run::Erase;
+        runPos_ = a;
+        runCount_ = um_.undoCount();
+    } else {
+        run_ = Run::None;
+    }
+    return removed;
+}
+
 // ---------------------------------------------------------------- search and replace
 
 ReplaceResult Editor::replaceAll(const std::string& pattern, const std::string& replacement,
@@ -171,30 +249,40 @@ bool Editor::replaceNext(Pos from, const std::string& pattern, const std::string
 
 // ---------------------------------------------------------------- undo / redo
 
-void Editor::apply(const Command& c) {
-    if (c.type == CmdType::Insert) doc_.insertText(c.start, c.text);
-    else doc_.deleteRange(c.start, c.end);
+Pos Editor::apply(const Command& c) {
+    if (c.type == CmdType::Insert) return doc_.insertText(c.start, c.text);   // cursor after the new text
+    doc_.deleteRange(c.start, c.end);
+    return c.start;
 }
 
-void Editor::reverse(const Command& c) {
-    if (c.type == CmdType::Insert) doc_.deleteRange(c.start, c.end);
-    else doc_.insertText(c.start, c.text);
+Pos Editor::reverse(const Command& c) {
+    if (c.type == CmdType::Insert) {
+        doc_.deleteRange(c.start, c.end);
+        return c.start;
+    }
+    return doc_.insertText(c.start, c.text);                                   // cursor after the restored text
 }
 
-bool Editor::undo(std::string* label) {
+bool Editor::undo(std::string* label, Pos* where) {
     if (depth_ > 0 || !um_.canUndo()) return false;
+    run_ = Run::None;
     Group g = um_.takeUndo();
-    for (size_t i = g.cmds.size(); i > 0; --i) reverse(g.cmds[i - 1]);   // newest command first
+    Pos last;
+    for (size_t i = g.cmds.size(); i > 0; --i) last = reverse(g.cmds[i - 1]);   // newest command first
     if (label) *label = g.label;
+    if (where) *where = last;
     um_.putRedo(g);
     return true;
 }
 
-bool Editor::redo(std::string* label) {
+bool Editor::redo(std::string* label, Pos* where) {
     if (depth_ > 0 || !um_.canRedo()) return false;
+    run_ = Run::None;
     Group g = um_.takeRedo();
-    for (size_t i = 0; i < g.cmds.size(); ++i) apply(g.cmds[i]);         // oldest command first
+    Pos last;
+    for (size_t i = 0; i < g.cmds.size(); ++i) last = apply(g.cmds[i]);         // oldest command first
     if (label) *label = g.label;
+    if (where) *where = last;
     um_.putUndo(g);
     return true;
 }
@@ -204,13 +292,22 @@ bool Editor::redo(std::string* label) {
 void Editor::newDocument() {
     doc_.clear();
     um_.clear();
+    run_ = Run::None;
     depth_ = 0;
     pending_.cmds.clear();
 }
 
 IOResult Editor::open(const std::string& path) {
     IOResult r = openFile(doc_, path);
-    if (r.ok) um_.clear();            // old steps refer to the old text
+    if (r.ok) { um_.clear(); run_ = Run::None; }   // old steps refer to the old text
+    return r;
+}
+
+IOResult Editor::renameFile(const std::string& newName) {
+    if (doc_.path().empty()) return IOResult{false, "This document has no file yet. Save it first, then rename it."};
+    std::string newPath;
+    IOResult r = ::renameFile(doc_.path(), newName, &newPath);
+    if (r.ok) doc_.setPath(newPath);
     return r;
 }
 
