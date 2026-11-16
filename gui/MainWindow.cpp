@@ -12,7 +12,6 @@
 #include <QDropEvent>
 #include <QFileDialog>
 #include <QFileInfo>
-#include <QFileSystemModel>
 #include <QHBoxLayout>
 #include <QInputDialog>
 #include <QKeyEvent>
@@ -26,16 +25,24 @@
 #include <QPushButton>
 #include <QSettings>
 #include <QShortcut>
+#include <QStackedWidget>
 #include <QStatusBar>
 #include <QTabBar>
 #include <QTabWidget>
-#include <QTreeView>
+#include <QToolBar>
+#include <QToolButton>
 #include <QUrl>
 #include <QVBoxLayout>
 #include <algorithm>
 #include <functional>
 
 #include "CodeView.h"
+#include "FileExplorer.h"
+#include "WelcomePage.h"
+#include "Icons.h"
+#include "Theme.h"
+#include "WinTheme.h"
+#include "FileIO.h"
 #include "Workspace.h"
 
 static const char* kApp = "DevPad";
@@ -44,12 +51,14 @@ static const char* kApp = "DevPad";
 
 MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     setWindowTitle(kApp);
+    setWindowIcon(Icons::app());
     setAcceptDrops(true);
     resize(1200, 780);
 
     tabs_ = new QTabWidget(this);
     tabs_->setDocumentMode(true);
-    tabs_->setTabsClosable(true);
+    tabs_->setTabsClosable(false);                        // own close buttons (see newTab), drawn to match the theme
+    tabs_->setIconSize(QSize(16, 16));
     tabs_->setMovable(true);
     tabs_->setUsesScrollButtons(true);
     tabs_->tabBar()->setContextMenuPolicy(Qt::CustomContextMenu);
@@ -78,35 +87,61 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     });
 
     buildFindBar();
-    QWidget* central = new QWidget(this);
-    QVBoxLayout* lay = new QVBoxLayout(central);
+    editorArea_ = new QWidget(this);
+    QVBoxLayout* lay = new QVBoxLayout(editorArea_);
     lay->setContentsMargins(0, 0, 0, 0);
     lay->setSpacing(0);
     lay->addWidget(tabs_, 1);
     lay->addWidget(findBar_);
-    setCentralWidget(central);
 
-    // sidebar: file tree
-    fsModel_ = new QFileSystemModel(this);
-    fsModel_->setFilter(QDir::AllDirs | QDir::Files | QDir::NoDotAndDotDot);
-    tree_ = new QTreeView(this);
-    tree_->setModel(fsModel_);
-    tree_->setHeaderHidden(true);
-    for (int c = 1; c < 4; ++c) tree_->hideColumn(c);
-    tree_->setEditTriggers(QAbstractItemView::NoEditTriggers);
-    connect(tree_, &QTreeView::activated, this, &MainWindow::onTreeActivated);
+    // no file open: the welcome page takes the editor's place
+    welcome_ = new WelcomePage(this);
+    connect(welcome_, &WelcomePage::newFileRequested, this, [this]() { newTab(); });
+    connect(welcome_, &WelcomePage::openFileRequested, this, &MainWindow::openDialog);
+    connect(welcome_, &WelcomePage::openFolderRequested, this, &MainWindow::openFolderDialog);
+    connect(welcome_, &WelcomePage::quickOpenRequested, this, &MainWindow::quickOpen);
+    connect(welcome_, &WelcomePage::shortcutsRequested, this, [this]() { if (shortcutsAct_) shortcutsAct_->trigger(); });
+    connect(welcome_, &WelcomePage::recentFileRequested, this, [this](const QString& p) { openPath(p); });
+    connect(welcome_, &WelcomePage::recentFolderRequested, this, [this](const QString& p) {
+        if (!QFileInfo(p).isDir()) { updateCentral(); return; }
+        setWorkspaceRoot(p);
+        addRecentFolder(p);
+        dock_->show();
+    });
+    centralStack_ = new QStackedWidget(this);
+    centralStack_->addWidget(welcome_);
+    centralStack_->addWidget(editorArea_);
+    setCentralWidget(centralStack_);
+
+    // sidebar: file manager
+    explorer_ = new FileExplorer(this);
+    connect(explorer_, &FileExplorer::openRequested, this, [this](const QString& p) { openPath(p); });
+    connect(explorer_, &FileExplorer::pathRenamed, this, &MainWindow::onPathRenamed);
+    connect(explorer_, &FileExplorer::pathRemoved, this, &MainWindow::onPathRemoved);
+    connect(explorer_, &FileExplorer::openFolderRequested, this, &MainWindow::openFolderDialog);
+    explorer_->unsavedCount = [this](const QString& path) {
+        int n = 0;
+        for (int i = 0; i < tabs_->count(); ++i) {
+            const std::string p = viewAt(i)->editor().doc().path();
+            if (!p.empty() && viewAt(i)->editor().doc().modified() && isSameOrInside(p, path.toUtf8().toStdString())) ++n;
+        }
+        return n;
+    };
     dock_ = new QDockWidget("Explorer", this);
     dock_->setObjectName("explorerDock");
-    dock_->setWidget(tree_);
+    dock_->setWidget(explorer_);
+    dock_->setTitleBarWidget(new QWidget(dock_));        // the explorer draws its own header
     dock_->setFeatures(QDockWidget::NoDockWidgetFeatures);
+    dock_->setMinimumWidth(170);
     addDockWidget(Qt::LeftDockWidgetArea, dock_);
-    dock_->hide();
+    resizeDocks({dock_}, {250}, Qt::Horizontal);
 
     // status bar
     posLabel_ = new QLabel("Ln 1, Col 1");
     langLabel_ = new QLabel();
     eolLabel_ = new QLabel("LF");
-    issueBtn_ = new QPushButton("✓ Brackets OK");
+    issueBtn_ = new QPushButton("Brackets OK");
+    issueBtn_->setIcon(Icons::get(Icons::Check, QColor(0x73, 0xc9, 0x91), QColor(0x73, 0xc9, 0x91)));
     issueBtn_->setFlat(true);
     issueBtn_->setCursor(Qt::PointingHandCursor);
     connect(issueBtn_, &QPushButton::clicked, this, [this]() {
@@ -117,55 +152,92 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     statusBar()->addPermanentWidget(issueBtn_);
     statusBar()->addPermanentWidget(posLabel_);
     statusBar()->addPermanentWidget(langLabel_);
-    statusBar()->addPermanentWidget(new QLabel("UTF-8"));
+    encLabel_ = new QLabel("UTF-8");
+    statusBar()->addPermanentWidget(encLabel_);
     statusBar()->addPermanentWidget(eolLabel_);
 
     buildActions();
+    buildActivityBar();
     applyDarkTheme();
-    newTab();
+    enableDarkTitleBar(this);
+    updateCentral();
 }
 
+// Slim bar on the far left with the main places, like other modern editors.
+void MainWindow::buildActivityBar() {
+    QToolBar* bar = new QToolBar("Activity Bar", this);
+    bar->setObjectName("activityBar");
+    bar->setMovable(false);
+    bar->setFloatable(false);
+    bar->setOrientation(Qt::Vertical);
+    bar->setIconSize(QSize(24, 24));
+    bar->setToolButtonStyle(Qt::ToolButtonIconOnly);
+    bar->setContextMenuPolicy(Qt::PreventContextMenu);
+    bar->toggleViewAction()->setVisible(false);
+    addToolBar(Qt::LeftToolBarArea, bar);
+
+    const QColor rest(0x85, 0x85, 0x85), lit(0xf0, 0xf0, 0xf0);
+    QAction* side = dock_->toggleViewAction();             // checkable: shows whether the Explorer is open
+    side->setIcon(Icons::get(Icons::Files, rest, lit));
+    side->setToolTip("Explorer (Ctrl+B)");
+    bar->addAction(side);
+    QAction* find = bar->addAction(Icons::get(Icons::Search, rest, lit), "Find");
+    find->setToolTip("Find in File (Ctrl+F)");
+    connect(find, &QAction::triggered, this, [this]() { showFind(false); });
+    QAction* go = bar->addAction(Icons::get(Icons::Palette, rest, lit), "Go to File");
+    go->setToolTip("Go to File (Ctrl+P)");
+    connect(go, &QAction::triggered, this, &MainWindow::quickOpen);
+    QWidget* spacer = new QWidget(bar);
+    spacer->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Expanding);
+    bar->addWidget(spacer);
+    QAction* keys = bar->addAction(Icons::get(Icons::Keyboard, rest, lit), "Keyboard Shortcuts");
+    keys->setToolTip("Keyboard Shortcuts (F1)");
+    connect(keys, &QAction::triggered, this, [this]() { if (shortcutsAct_) shortcutsAct_->trigger(); });
+}
+
+// ---------------------------------------------------------------- welcome page, recent lists
+
+bool MainWindow::welcomeShown() const { return centralStack_->currentWidget() == welcome_; }
+
+void MainWindow::updateCentral() {
+    const bool any = tabs_->count() > 0;
+    centralStack_->setCurrentWidget(any ? editorArea_ : welcome_);
+    for (QWidget* w : std::initializer_list<QWidget*>{posLabel_, langLabel_, eolLabel_, encLabel_, issueBtn_}) w->setVisible(any);
+    if (!any) {
+        findBar_->hide();
+        matches_.clear();
+        welcome_->setRecent(recentFiles(), recentFolders());
+        welcome_->setFolderOpen(!root_.isEmpty());
+        refreshTitle();
+    }
+}
+
+static QStringList existingOnly(const QStringList& paths) {
+    QStringList out;
+    for (const QString& p : paths) if (QFileInfo::exists(p)) out << p;
+    return out;
+}
+
+QStringList MainWindow::recentFiles() const { return existingOnly(QSettings().value("recentFiles").toStringList()); }
+QStringList MainWindow::recentFolders() const { return existingOnly(QSettings().value("recentFolders").toStringList()); }
+
+void MainWindow::addRecent(const char* key, const QString& path) {
+    if (path.isEmpty()) return;
+    const QString p = QFileInfo(path).absoluteFilePath();
+    QSettings s;
+    QStringList list = s.value(key).toStringList();
+    for (int i = list.size() - 1; i >= 0; --i)
+        if (QFileInfo(list[i]) == QFileInfo(p) || list[i].compare(p, Qt::CaseInsensitive) == 0) list.removeAt(i);
+    list.prepend(p);
+    while (list.size() > 12) list.removeLast();
+    s.setValue(key, list);
+    if (welcome_ && welcomeShown()) welcome_->setRecent(recentFiles(), recentFolders());
+}
+
+void MainWindow::addRecentFolder(const QString& dir) { addRecent("recentFolders", dir); }
+
 void MainWindow::applyDarkTheme() {
-    qApp->setStyle("Fusion");
-    QPalette p;
-    p.setColor(QPalette::Window, QColor(0x25, 0x25, 0x26));
-    p.setColor(QPalette::WindowText, QColor(0xcc, 0xcc, 0xcc));
-    p.setColor(QPalette::Base, QColor(0x1e, 0x1e, 0x1e));
-    p.setColor(QPalette::AlternateBase, QColor(0x25, 0x25, 0x26));
-    p.setColor(QPalette::Text, QColor(0xd4, 0xd4, 0xd4));
-    p.setColor(QPalette::Button, QColor(0x33, 0x33, 0x33));
-    p.setColor(QPalette::ButtonText, QColor(0xcc, 0xcc, 0xcc));
-    p.setColor(QPalette::Highlight, QColor(0x09, 0x47, 0x71));
-    p.setColor(QPalette::HighlightedText, Qt::white);
-    p.setColor(QPalette::ToolTipBase, QColor(0x25, 0x25, 0x26));
-    p.setColor(QPalette::ToolTipText, QColor(0xcc, 0xcc, 0xcc));
-    p.setColor(QPalette::PlaceholderText, QColor(0x80, 0x80, 0x80));
-    p.setColor(QPalette::Disabled, QPalette::Text, QColor(0x6e, 0x6e, 0x6e));
-    p.setColor(QPalette::Disabled, QPalette::ButtonText, QColor(0x6e, 0x6e, 0x6e));
-    qApp->setPalette(p);
-    qApp->setStyleSheet(
-        "QTabBar::tab{background:#2d2d2d;color:#969696;padding:7px 14px;border-right:1px solid #252526;min-width:60px;}"
-        "QTabBar::tab:selected{background:#1e1e1e;color:#ffffff;border-top:2px solid #0e7ad1;}"
-        "QTabBar::tab:hover:!selected{background:#323233;}"
-        "QTabWidget::pane{border:0;}"
-        "QStatusBar{background:#007acc;color:#ffffff;}"
-        "QStatusBar QLabel,QStatusBar QPushButton{color:#ffffff;padding:0 8px;background:transparent;border:0;}"
-        "QDockWidget{color:#bbbbbb;font-weight:bold;}"
-        "QDockWidget::title{background:#252526;padding:6px;}"
-        "QTreeView{background:#252526;border:0;color:#cccccc;}"
-        "QTreeView::item:selected{background:#094771;}"
-        "QMenuBar{background:#333333;color:#cccccc;}"
-        "QMenuBar::item:selected{background:#505050;}"
-        "QMenu{background:#252526;color:#cccccc;border:1px solid #454545;}"
-        "QMenu::item:selected{background:#094771;}"
-        "QLineEdit{background:#3c3c3c;color:#cccccc;border:1px solid #3c3c3c;padding:3px 6px;border-radius:2px;}"
-        "QLineEdit:focus{border:1px solid #0e7ad1;}"
-        "QPushButton{background:#3c3c3c;color:#cccccc;border:1px solid #454545;padding:3px 10px;border-radius:2px;}"
-        "QPushButton:hover{background:#505050;}"
-        "QCheckBox{color:#cccccc;}"
-        "QDialog{background:#252526;}"
-        "QListWidget{background:#252526;color:#cccccc;border:1px solid #454545;}"
-        "QListWidget::item:selected{background:#094771;color:#ffffff;}");
+    Theme::apply();
 }
 
 // ---------------------------------------------------------------- actions and shortcuts
@@ -255,7 +327,7 @@ void MainWindow::buildActions() {
     add(view, "Reset Zoom", seq("Ctrl+0"), [zoomBy]() { zoomBy(0); });
 
     QMenu* help = menuBar()->addMenu("&Help");
-    add(help, "Keyboard Shortcuts", seq("F1"), [this]() {
+    shortcutsAct_ = add(help, "Keyboard Shortcuts", seq("F1"), [this]() {
         QMessageBox::information(this, "Keyboard shortcuts",
             "Tabs\n"
             "  Ctrl+Tab / Ctrl+Shift+Tab   next / previous tab\n"
@@ -267,6 +339,13 @@ void MainWindow::buildActions() {
             "  F2                          rename file\n"
             "  Ctrl+Shift+O                open folder\n"
             "  Ctrl+B                      toggle sidebar\n\n"
+            "Explorer (sidebar, when it has focus)\n"
+            "  click / Enter               open file, open or close folder\n"
+            "  F2                          rename        Del  delete (Recycle Bin)\n"
+            "  Shift+Del                   delete permanently\n"
+            "  Ctrl+X / Ctrl+C / Ctrl+V    cut / copy / paste files\n"
+            "  drag onto a folder          move  (hold Ctrl to copy)\n"
+            "  right-click                 new file / folder, duplicate, copy path, reveal\n\n"
             "Lines\n"
             "  Alt+Up / Alt+Down           move line(s)\n"
             "  Shift+Alt+Up / Down         copy line(s) up / down  (Ctrl+D also copies down)\n"
@@ -276,7 +355,7 @@ void MainWindow::buildActions() {
             "  Ctrl+/                      toggle comment\n"
             "  Ctrl+L                      select line\n\n"
             "Brackets and quotes\n"
-            "  type ( [ { \" ' ` with text selected   wrap the selection\n"
+            "  type ( [ { \" ' ` with text selected   wrap the selection (the same key again unwraps)\n"
             "  type ( [ { \" ' `                      auto-closing pair\n\n"
             "Search\n"
             "  Ctrl+F / Ctrl+H             find / replace\n"
@@ -290,30 +369,40 @@ void MainWindow::buildActions() {
 
 void MainWindow::buildFindBar() {
     findBar_ = new QWidget(this);
-    findBar_->setStyleSheet("QWidget#findBar{background:#252526;border-top:1px solid #3c3c3c;}");
     findBar_->setObjectName("findBar");
     QVBoxLayout* v = new QVBoxLayout(findBar_);
-    v->setContentsMargins(8, 6, 8, 6);
-    v->setSpacing(4);
+    v->setContentsMargins(10, 7, 10, 7);
+    v->setSpacing(6);
+
+    auto iconButton = [this](Icons::Glyph g, const QString& tip, bool checkable) {
+        QToolButton* b = new QToolButton(findBar_);
+        b->setIcon(Icons::get(g));
+        b->setIconSize(QSize(16, 16));
+        b->setFixedSize(28, 28);
+        b->setToolTip(tip);
+        b->setCheckable(checkable);
+        b->setFocusPolicy(Qt::NoFocus);
+        return b;
+    };
 
     QHBoxLayout* r1 = new QHBoxLayout();
+    r1->setSpacing(4);
     find_ = new QLineEdit();
     find_->setPlaceholderText("Find");
-    caseBox_ = new QCheckBox("Aa");
-    caseBox_->setToolTip("Match case");
-    wordBox_ = new QCheckBox("Word");
-    wordBox_->setToolTip("Whole word");
+    find_->addAction(Icons::get(Icons::Search, QColor(0x80, 0x80, 0x80)), QLineEdit::LeadingPosition);
+    caseBox_ = iconButton(Icons::CaseSensitive, "Match case", true);
+    wordBox_ = iconButton(Icons::WholeWord, "Match whole word", true);
     findCount_ = new QLabel();
+    findCount_->setObjectName("findCount");
     findCount_->setMinimumWidth(90);
-    QPushButton* prev = new QPushButton("▲");
-    QPushButton* next = new QPushButton("▼");
-    QPushButton* close = new QPushButton("✕");
-    prev->setToolTip("Previous match (Shift+F3)");
-    next->setToolTip("Next match (F3)");
-    for (QPushButton* b : {prev, next, close}) b->setFixedWidth(30);
+    findCount_->setAlignment(Qt::AlignCenter);
+    QToolButton* prev = iconButton(Icons::ArrowUp, "Previous match (Shift+F3)", false);
+    QToolButton* next = iconButton(Icons::ArrowDown, "Next match (F3)", false);
+    QToolButton* close = iconButton(Icons::Close, "Close (Esc)", false);
     r1->addWidget(find_, 1);
     r1->addWidget(caseBox_);
     r1->addWidget(wordBox_);
+    r1->addSpacing(4);
     r1->addWidget(findCount_);
     r1->addWidget(prev);
     r1->addWidget(next);
@@ -323,6 +412,7 @@ void MainWindow::buildFindBar() {
     replRow_ = new QWidget();
     QHBoxLayout* r2 = new QHBoxLayout(replRow_);
     r2->setContentsMargins(0, 0, 0, 0);
+    r2->setSpacing(6);
     repl_ = new QLineEdit();
     repl_->setPlaceholderText("Replace");
     QPushButton* one = new QPushButton("Replace");
@@ -330,16 +420,17 @@ void MainWindow::buildFindBar() {
     r2->addWidget(repl_, 1);
     r2->addWidget(one);
     r2->addWidget(all);
+    r2->addSpacing(28 * 3 + 8);                         // line the field up with the one above
     v->addWidget(replRow_);
 
     connect(find_, &QLineEdit::textChanged, this, &MainWindow::updateFind);
     connect(find_, &QLineEdit::returnPressed, this, [this]() { findNext(false); });
     connect(repl_, &QLineEdit::returnPressed, this, &MainWindow::replaceOne);
-    connect(caseBox_, &QCheckBox::toggled, this, &MainWindow::updateFind);
-    connect(wordBox_, &QCheckBox::toggled, this, &MainWindow::updateFind);
-    connect(prev, &QPushButton::clicked, this, [this]() { findNext(true); });
-    connect(next, &QPushButton::clicked, this, [this]() { findNext(false); });
-    connect(close, &QPushButton::clicked, this, &MainWindow::closeFind);
+    connect(caseBox_, &QToolButton::toggled, this, &MainWindow::updateFind);
+    connect(wordBox_, &QToolButton::toggled, this, &MainWindow::updateFind);
+    connect(prev, &QToolButton::clicked, this, [this]() { findNext(true); });
+    connect(next, &QToolButton::clicked, this, [this]() { findNext(false); });
+    connect(close, &QToolButton::clicked, this, &MainWindow::closeFind);
     connect(one, &QPushButton::clicked, this, &MainWindow::replaceOne);
     connect(all, &QPushButton::clicked, this, &MainWindow::replaceEverything);
 
@@ -484,9 +575,21 @@ CodeView* MainWindow::newTab(const QString& path) {
     }
     connectView(v);
     const int i = tabs_->addTab(v, QString());
+    QToolButton* x = new QToolButton(tabs_->tabBar());
+    x->setObjectName("tabClose");
+    x->setIcon(Icons::get(Icons::Close, QColor(0x9d, 0x9d, 0x9d), QColor(0xff, 0xff, 0xff)));
+    x->setIconSize(QSize(14, 14));
+    x->setFixedSize(20, 20);
+    x->setAutoRaise(true);
+    x->setToolTip("Close (Ctrl+W)");
+    x->setFocusPolicy(Qt::NoFocus);
+    connect(x, &QToolButton::clicked, this, [this, v]() { closeTab(tabs_->indexOf(v)); });
+    tabs_->tabBar()->setTabButton(i, QTabBar::RightSide, x);
     tabs_->setCurrentIndex(i);
     refreshTab(v);
+    updateCentral();
     v->setFocus();
+    if (!path.isEmpty()) addRecent("recentFiles", path);
     return v;
 }
 
@@ -507,7 +610,7 @@ bool MainWindow::openPath(const QString& path) {
         return false;
     }
     const int existing = indexOfPath(path);
-    if (existing >= 0) { tabs_->setCurrentIndex(existing); return true; }
+    if (existing >= 0) { tabs_->setCurrentIndex(existing); addRecent("recentFiles", fi.absoluteFilePath()); return true; }
     if (root_.isEmpty()) setWorkspaceRoot(fi.absolutePath());
     // a single untouched "Untitled" tab is replaced instead of left behind
     CodeView* cur = currentView();
@@ -517,6 +620,7 @@ bool MainWindow::openPath(const QString& path) {
         if (!cur->openFile(fi.absoluteFilePath(), &err)) { QMessageBox::warning(this, kApp, err); return false; }
         refreshTab(cur);
         onTabChanged(0);
+        addRecent("recentFiles", fi.absoluteFilePath());
         return true;
     }
     return newTab(fi.absoluteFilePath()) != nullptr;
@@ -529,6 +633,7 @@ void MainWindow::refreshTab(CodeView* v) {
     QString name = path.isEmpty() ? v->property("untitledName").toString() : QFileInfo(path).fileName();
     if (v->editor().doc().modified()) name += QStringLiteral(" ●");
     tabs_->setTabText(i, name);
+    tabs_->setTabIcon(i, Icons::forFile(path.isEmpty() ? QStringLiteral("untitled.txt") : path));
     tabs_->setTabToolTip(i, path.isEmpty() ? name : QDir::toNativeSeparators(path));
 }
 
@@ -544,6 +649,7 @@ void MainWindow::refreshTitle() {
 void MainWindow::onTabChanged(int) {
     CodeView* v = currentView();
     if (!v) return;
+    explorer_->reveal(QString::fromStdString(v->editor().doc().path()));
     refreshTitle();
     onViewStateChanged();
     if (findBar_->isVisible()) highlightAll();
@@ -564,7 +670,9 @@ void MainWindow::onViewStateChanged() {
     eolLabel_->setText(v->editor().doc().crlf() ? "CRLF" : "LF");
     if (v->bracketsReady()) {
         const size_t n = v->bracketIssueCount();
-        issueBtn_->setText(n == 0 ? QString("✓ Brackets OK") : QString("⚠ %1 bracket issue%2").arg(n).arg(n == 1 ? "" : "s"));
+        issueBtn_->setText(n == 0 ? QString("Brackets OK") : QString("%1 bracket issue%2").arg(n).arg(n == 1 ? "" : "s"));
+        issueBtn_->setIcon(n == 0 ? Icons::get(Icons::Check, QColor(0x73, 0xc9, 0x91), QColor(0x73, 0xc9, 0x91))
+                                  : Icons::get(Icons::Warning, QColor(0xe2, 0xb7, 0x14), QColor(0xe2, 0xb7, 0x14)));
         issueBtn_->setToolTip(n == 0 ? QString() : v->firstBracketIssue());
     }
 }
@@ -596,7 +704,7 @@ bool MainWindow::closeTab(int index, bool force) {
     if (!force && !maybeSave(v)) return false;
     tabs_->removeTab(index);
     delete v;
-    if (tabs_->count() == 0) newTab();
+    updateCentral();                                    // the last tab closed: back to the welcome page
     return true;
 }
 
@@ -618,6 +726,7 @@ bool MainWindow::saveView(CodeView* v, bool forceDialog) {
     refreshTab(v);
     refreshTitle();
     statusBar()->showMessage("Saved " + QDir::toNativeSeparators(path), 3000);
+    addRecent("recentFiles", path);
     return true;
 }
 
@@ -636,7 +745,7 @@ void MainWindow::openDialog() {
 
 void MainWindow::openFolderDialog() {
     const QString d = QFileDialog::getExistingDirectory(this, "Open Folder", root_);
-    if (!d.isEmpty()) { setWorkspaceRoot(d); dock_->show(); }
+    if (!d.isEmpty()) { setWorkspaceRoot(d); addRecentFolder(d); dock_->show(); }
 }
 
 void MainWindow::setWorkspaceRoot(const QString& dir) {
@@ -644,14 +753,46 @@ void MainWindow::setWorkspaceRoot(const QString& dir) {
     if (!fi.isDir()) return;
     root_ = fi.canonicalFilePath();
     rootChosen_ = true;
-    fsModel_->setRootPath(root_);
-    tree_->setRootIndex(fsModel_->index(root_));
-    dock_->setWindowTitle(fi.fileName().isEmpty() ? root_ : fi.fileName().toUpper());
+    explorer_->setRoot(root_);
+    welcome_->setFolderOpen(true);
+    if (CodeView* v = currentView()) explorer_->reveal(QString::fromStdString(v->editor().doc().path()));
 }
 
-void MainWindow::onTreeActivated(const QModelIndex& idx) {
-    const QString p = fsModel_->filePath(idx);
-    if (QFileInfo(p).isFile()) openPath(p);
+// The explorer renamed or moved a file or folder: tabs showing it (or anything inside it) follow.
+// Unsaved edits and undo history stay; only the path changes.
+static QString cleanPath(const QString& p) { return QDir::cleanPath(QDir::fromNativeSeparators(p)); }
+
+static bool pathAtOrBelow(const QString& path, const QString& base) {
+    const Qt::CaseSensitivity cs =
+#ifdef Q_OS_WIN
+        Qt::CaseInsensitive;
+#else
+        Qt::CaseSensitive;
+#endif
+    const QString p = cleanPath(path), b = cleanPath(base);
+    return p.compare(b, cs) == 0 || (p.startsWith(b, cs) && p.size() > b.size() && p[b.size()] == '/');
+}
+
+void MainWindow::onPathRenamed(const QString& oldPath, const QString& newPath) {
+    for (int i = 0; i < tabs_->count(); ++i) {
+        CodeView* v = viewAt(i);
+        const QString p = QString::fromStdString(v->editor().doc().path());
+        if (p.isEmpty() || !pathAtOrBelow(p, oldPath)) continue;
+        const QString np = cleanPath(newPath) + cleanPath(p).mid(cleanPath(oldPath).size());
+        v->editor().setPath(np.toStdString());
+        v->setLanguageForPath(np);
+        refreshTab(v);
+    }
+    refreshTitle();
+    onViewStateChanged();
+}
+
+// The explorer deleted a file or folder (the user confirmed, unsaved tabs included): close its tabs.
+void MainWindow::onPathRemoved(const QString& path) {
+    for (int i = tabs_->count() - 1; i >= 0; --i) {
+        const QString p = QString::fromStdString(viewAt(i)->editor().doc().path());
+        if (!p.isEmpty() && pathAtOrBelow(p, path)) closeTab(i, true);
+    }
 }
 
 void MainWindow::goToLineDialog() {
@@ -735,11 +876,16 @@ void MainWindow::quickOpen() {
     const DynArray<std::string> files = listWorkspaceFiles(root_.toUtf8().toStdString());
 
     QDialog dlg(this, Qt::Dialog | Qt::FramelessWindowHint);
-    dlg.setStyleSheet("QDialog{border:1px solid #454545;}");
-    dlg.resize(620, 360);
+    dlg.setObjectName("quickOpen");
+    dlg.setStyleSheet("QDialog#quickOpen{background:#1f1f1f;border:1px solid #3a3a3a;}"
+                      "QListWidget{background:#1f1f1f;border:0;}"
+                      "QListWidget::item{padding:5px 6px;border-radius:5px;}"
+                      "QListWidget::item:selected{background:#233a5e;color:#ffffff;}");
+    dlg.resize(640, 380);
     QVBoxLayout* lay = new QVBoxLayout(&dlg);
     lay->setContentsMargins(6, 6, 6, 6);
     QLineEdit* input = new QLineEdit();
+    input->addAction(Icons::get(Icons::Search, QColor(0x80, 0x80, 0x80)), QLineEdit::LeadingPosition);
     input->setPlaceholderText(QString("Go to file in %1 … (e.g. \"mw\" finds MainWindow.cpp)").arg(QFileInfo(root_).fileName()));
     QListWidget* list = new QListWidget();
     lay->addWidget(input);
@@ -749,7 +895,10 @@ void MainWindow::quickOpen() {
     auto refresh = [&]() {
         list->clear();
         const DynArray<size_t> hits = rankFiles(files, input->text().toUtf8().toStdString(), 60);
-        for (size_t i = 0; i < hits.size(); ++i) list->addItem(QString::fromUtf8(files[hits[i]].c_str()));
+        for (size_t i = 0; i < hits.size(); ++i) {
+            const QString rel = QString::fromUtf8(files[hits[i]].c_str());
+            new QListWidgetItem(Icons::forFile(rel), rel, list);
+        }
         if (list->count() > 0) list->setCurrentRow(0);
     };
     connect(input, &QLineEdit::textChanged, &dlg, refresh);
@@ -782,7 +931,7 @@ void MainWindow::dropEvent(QDropEvent* e) {
     for (const QUrl& u : e->mimeData()->urls()) {
         if (!u.isLocalFile()) continue;
         const QString p = u.toLocalFile();
-        if (QFileInfo(p).isDir()) { setWorkspaceRoot(p); dock_->show(); }
+        if (QFileInfo(p).isDir()) { setWorkspaceRoot(p); addRecentFolder(p); dock_->show(); }
         else openPath(p);
     }
 }
@@ -791,7 +940,7 @@ void MainWindow::closeEvent(QCloseEvent* e) {
     for (int i = 0; i < tabs_->count(); ++i) {
         if (!maybeSave(viewAt(i))) { e->ignore(); return; }
     }
-    QSettings s("DevPad", "DevPad");
+    QSettings s;
     QStringList files;
     for (int i = 0; i < tabs_->count(); ++i) {
         const QString p = QString::fromStdString(viewAt(i)->editor().doc().path());
@@ -807,11 +956,11 @@ void MainWindow::closeEvent(QCloseEvent* e) {
 }
 
 void MainWindow::restoreSession() {
-    QSettings s("DevPad", "DevPad");
+    QSettings s;
     restoreGeometry(s.value("geometry").toByteArray());
     const QString root = s.value("root").toString();
     if (!root.isEmpty() && QFileInfo(root).isDir()) setWorkspaceRoot(root);
-    dock_->setVisible(s.value("sidebar", false).toBool() && !root_.isEmpty());
+    dock_->setVisible(s.value("sidebar", true).toBool());
     const int zoom = s.value("zoom", 11).toInt();
     for (const QString& f : s.value("files").toStringList())
         if (QFileInfo(f).isFile()) openPath(f);

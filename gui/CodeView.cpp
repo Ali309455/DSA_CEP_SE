@@ -6,6 +6,7 @@
 #include <QFileInfo>
 #include <QFontDatabase>
 #include <QFontMetrics>
+#include "Theme.h"
 #include <QGuiApplication>
 #include <QInputMethodEvent>
 #include <QKeyEvent>
@@ -19,22 +20,16 @@
 
 // ---------------------------------------------------------------- colours (dark theme)
 
-static const QColor kBg(0x1e, 0x1e, 0x1e);
-static const QColor kCurLine(0x2a, 0x2d, 0x2e);
-static const QColor kSelection(0x26, 0x4f, 0x78);
-static const QColor kFind(0x61, 0x4a, 0x1a);
-static const QColor kGutterNum(0x85, 0x85, 0x85);
-static const QColor kGutterCur(0xc6, 0xc6, 0xc6);
-static const QColor kCursorCol(0xae, 0xaf, 0xad);
-static const QColor kGuide(0x40, 0x40, 0x40);
-static const QColor kTokenColors[] = {
-    QColor(0xd4, 0xd4, 0xd4),   // text
-    QColor(0x56, 0x9c, 0xd6),   // keyword
-    QColor(0x4e, 0xc9, 0xb0),   // type
-    QColor(0xce, 0x91, 0x78),   // string
-    QColor(0xb5, 0xce, 0xa8),   // number
-    QColor(0x6a, 0x99, 0x55),   // comment
-    QColor(0xc5, 0x86, 0xc0)};  // preprocessor
+// colours come from the theme (Theme.h), so the whole window matches
+static const QColor& kBg = Theme::Editor;
+static const QColor& kCurLine = Theme::CurrentLine;
+static const QColor& kSelection = Theme::Selection;
+static const QColor& kFind = Theme::FindMatch;
+static const QColor& kGutterNum = Theme::GutterNumber;
+static const QColor& kGutterCur = Theme::GutterCurrent;
+static const QColor& kCursorCol = Theme::Caret;
+static const QColor& kGuide = Theme::IndentGuide;
+static const QColor* const kTokenColors = Theme::Syntax;
 
 static bool isWc(char c) { return isWordChar(c) || static_cast<unsigned char>(c) >= 0x80; }
 static bool isBlankC(char c) { return c == ' ' || c == '\t'; }
@@ -70,9 +65,9 @@ CodeView::CodeView(QWidget* parent) : QAbstractScrollArea(parent) {
     popup_->setFocusPolicy(Qt::NoFocus);
     popup_->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     popup_->setStyleSheet(
-        "QListWidget{background:#252526;color:#d4d4d4;border:1px solid #454545;outline:0;}"
-        "QListWidget::item{padding:2px 8px;}"
-        "QListWidget::item:selected{background:#094771;color:#ffffff;}");
+        "QListWidget{background:#252526;color:#d4d4d4;border:1px solid #3a3a3a;border-radius:6px;outline:0;padding:3px;}"
+        "QListWidget::item{padding:3px 8px;border-radius:4px;}"
+        "QListWidget::item:selected{background:#233a5e;color:#ffffff;}");
     popup_->hide();
     connect(popup_, &QListWidget::itemClicked, this, [this]() { acceptCompletion(); });
 
@@ -83,14 +78,12 @@ CodeView::CodeView(QWidget* parent) : QAbstractScrollArea(parent) {
 }
 
 void CodeView::applyFont() {
-    QFont f = QFontDatabase::systemFont(QFontDatabase::FixedFont);
-    f.setPointSize(zoom_);
-    f.setStyleHint(QFont::Monospace);
+    QFont f = Theme::codeFont(zoom_);
     setFont(f);
     viewport()->setFont(f);
     QFontMetrics fm(f);
     charW_ = std::max(1, fm.horizontalAdvance(QLatin1Char('M')));
-    lineH_ = fm.height() + 3;
+    lineH_ = fm.height() + 5;                         // a little air between lines
     updateGutter();
     updateScrollBars();
     viewport()->update();
@@ -578,8 +571,7 @@ void CodeView::paintEvent(QPaintEvent*) {
 
     // line-number gutter, drawn last so horizontal scrolling slides under it
     p.fillRect(0, 0, gutterW_, vh, kBg);
-    p.setPen(QColor(0x33, 0x33, 0x33));
-    p.drawLine(gutterW_ - 1, 0, gutterW_ - 1, vh);
+    // (no divider line: the gutter and the text share one surface, like modern editors)
     for (size_t l = first; l < last; ++l) {
         const int y = static_cast<int>(l - first) * lineH_;
         p.setPen(l == cur_.line ? kGutterCur : kGutterNum);
@@ -613,8 +605,10 @@ void CodeView::typeChar(char c) {
     const size_t from = selStart().line;
 
     if (hasSelection()) {
-        if (opener) {                                   // wrap the selection: "text" (text) {text} ...
-            SelRange r = surroundSelection(ed_, anchor_, cur_, c);
+        // wrap the selection: "text" (text) {text} ... ; the same bracket / quote again removes the pair
+        bool changed = false;
+        if (opener || isWrappedBy(doc, anchor_, cur_, c)) {
+            SelRange r = toggleSurround(ed_, anchor_, cur_, c, &changed);
             anchor_ = r.start;
             cur_ = r.end;
             edited(from);

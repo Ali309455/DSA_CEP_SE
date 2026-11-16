@@ -111,6 +111,9 @@ public:
     // folder). The text and the history are untouched. Fails, changing nothing, if the
     // document has no file yet, the name is invalid, or the target exists (see FileIO.h).
     IOResult renameFile(const std::string& newName);
+    // The file was renamed or moved by someone else (the Explorer): only the stored path changes,
+    // the text, the modified flag and the undo history stay.
+    void setPath(const std::string& path) { doc_.setPath(path); }
 
 private:
     Document doc_;

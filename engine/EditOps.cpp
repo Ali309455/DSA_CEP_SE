@@ -211,6 +211,47 @@ SelRange surroundSelection(Editor& ed, Pos a, Pos b, char open) {
     return r;
 }
 
+// The opener of the pair 'c' belongs to (c itself for openers and quotes); 0 if none.
+static char pairOpener(char c) {
+    if (pairCloser(c) != 0) return c;
+    if (c == ')') return '(';
+    if (c == ']') return '[';
+    if (c == '}') return '{';
+    return 0;
+}
+
+bool isWrappedBy(const Document& doc, Pos a, Pos b, char c) {
+    if (b < a) { Pos t = a; a = b; b = t; }
+    const char open = pairOpener(c);
+    if (open == 0 || a == b) return false;
+    if (a.line >= doc.lineCount() || b.line >= doc.lineCount()) return false;
+    const std::string first = doc.getLine(a.line);
+    const std::string last = (b.line == a.line) ? first : doc.getLine(b.line);
+    if (a.col == 0 || a.col > first.size() || b.col >= last.size()) return false;
+    return first[a.col - 1] == open && last[b.col] == pairCloser(open);
+}
+
+SelRange unwrapSelection(Editor& ed, Pos a, Pos b, char c) {
+    if (b < a) { Pos t = a; a = b; b = t; }
+    if (!isWrappedBy(ed.doc(), a, b, c)) throw std::invalid_argument("The selection is not wrapped by that pair.");
+    EditGroup g(ed, "unwrap");
+    ed.deleteRange(b, Pos{b.line, b.col + 1});       // closer first: it does not move 'a'
+    ed.deleteRange(Pos{a.line, a.col - 1}, a);
+    SelRange r;
+    r.start = Pos{a.line, a.col - 1};
+    r.end = (b.line == a.line) ? Pos{b.line, b.col - 1} : b;
+    return r;
+}
+
+SelRange toggleSurround(Editor& ed, Pos a, Pos b, char c, bool* changed) {
+    if (b < a) { Pos t = a; a = b; b = t; }
+    if (changed) *changed = true;
+    if (isWrappedBy(ed.doc(), a, b, c)) return unwrapSelection(ed, a, b, c);
+    if (pairCloser(c) != 0) return surroundSelection(ed, a, b, c);
+    if (changed) *changed = false;
+    return SelRange{a, b};
+}
+
 Pos insertNewLineSmart(Editor& ed, Pos at, size_t width) {
     const Document& doc = ed.doc();
     std::string line = doc.getLine(at.line);              // throws if the line does not exist

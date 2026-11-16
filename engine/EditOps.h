@@ -88,6 +88,20 @@ struct SelRange {
 // std::out_of_range for bad positions; nothing changes then.
 SelRange surroundSelection(Editor& ed, Pos a, Pos b, char open);
 
+// Is the text between a and b directly enclosed by the pair that 'c' belongs to: (|text|) ?
+// 'c' may be the opener or the closer: ( or ) , [ or ] , { or } , " , ' , ` . Positions outside
+// the document give false.
+bool isWrappedBy(const Document& doc, Pos a, Pos b, char c);
+
+// Remove the pair around the text between a and b (one undo step). Returns the range of the
+// text in the new document. Throws std::invalid_argument if the text is not wrapped by that pair.
+SelRange unwrapSelection(Editor& ed, Pos a, Pos b, char c);
+
+// Typing 'c' while text is selected, as the editor does it: if the text is already wrapped by
+// c's pair, the pair is removed (so a second "(" undoes the first); else an opener wraps it.
+// *changed is false (and nothing happens) for a closer around unwrapped text or another char.
+SelRange toggleSurround(Editor& ed, Pos a, Pos b, char c, bool* changed = nullptr);
+
 // Enter: split the line at 'at', keep its indentation, add one level after { ( [ , and if
 // the cursor is between a pair ( {|} ) open a block with the closer on its own line.
 // One undo step. Returns the new cursor position.

@@ -60,7 +60,13 @@ engine/FileIO.h/cpp   open / save / save-as, errors returned not thrown
 engine/EditOps.h/cpp  code-editor commands: move / duplicate / indent / comment lines, auto-pair, wrap selection, smart Enter
 engine/Workspace.h/cpp folder listing + fuzzy file search (Quick Open)
 gui/CodeView.h/cpp    the text area: custom-painted Qt widget on top of Editor (no QTextDocument)
-gui/MainWindow.h/cpp  tabs, menus, shortcuts, find bar, Quick Open, file tree, rename
+gui/MainWindow.h/cpp  tabs, menus, shortcuts, find bar, Quick Open, rename
+gui/FileExplorer.h/cpp  the file manager in the left sidebar
+gui/WelcomePage.h/cpp   shown when no file is open: start actions, recent files / folders, shortcuts
+gui/Theme.h/cpp         the dark theme: palette, style sheet, UI and code fonts (one place for every colour)
+gui/Icons.h/cpp         all icons, drawn in code: line icons, file-type badges, folders, the app icon
+gui/WinTheme.h/cpp      dark title bars on Windows 10 / 11 (dwmapi)
+gui/devpad.ico, devpad.rc.in   the program icon for devpad.exe
 gui/main.cpp          entry point
 app/console_main.cpp  command-line front end (1-based line/column numbers)
 tests/test_main.cpp   test suite incl. random stress test against a model
@@ -231,10 +237,42 @@ key presses into engine calls.
 | Tabs | `Ctrl+Tab` / `Ctrl+Shift+Tab` next / previous (also `Ctrl+PgDn` / `Ctrl+PgUp`), `Alt+1`..`Alt+9` go to tab (`Alt+9` = last), `Ctrl+N` new, `Ctrl+W` close |
 | Files | `Ctrl+P` fuzzy file search ("mw" finds `MainWindow.cpp`), `F2` rename file, `Ctrl+O` open, `Ctrl+Shift+O` open folder, `Ctrl+S` / `Ctrl+Shift+S` / `Ctrl+Alt+S` save / save as / save all, `Ctrl+B` sidebar |
 | Lines | `Alt+Up` / `Alt+Down` move line (or all selected lines), `Shift+Alt+Up` / `Shift+Alt+Down` copy line up / down (`Ctrl+D` copy down), `Ctrl+Shift+K` delete line, `Ctrl+Enter` / `Ctrl+Shift+Enter` new line below / above, `Ctrl+]` / `Ctrl+[` indent / outdent, `Ctrl+/` toggle comment, `Ctrl+L` select line |
-| Brackets, quotes | with text selected type `(` `[` `{` `"` `'` `` ` `` to wrap it (selection stays on the text); typing an opener adds the closer, typing the closer steps over it, Backspace between an empty pair removes both |
+| Brackets, quotes | with text selected type `(` `[` `{` `"` `'` `` ` `` to wrap it (selection stays on the text); the same key again, or the closing bracket, removes the pair; typing an opener adds the closer, typing the closer steps over it, Backspace between an empty pair removes both |
 | Typing | smart Enter keeps the indent and opens a block between `{ }`; Tab / Shift+Tab indent / outdent selected lines; Backspace in leading spaces goes back one tab stop; `Home` jumps to the first non-blank character first |
 | Search | `Ctrl+F` find, `Ctrl+H` replace, `F3` / `Shift+F3` next / previous, `Ctrl+G` go to line, `Ctrl+Space` autocomplete |
 | Edit | `Ctrl+Z`, `Ctrl+Y` / `Ctrl+Shift+Z`, cut / copy / paste (copy or cut with nothing selected takes the whole line), `Ctrl+Wheel` / `Ctrl+=` / `Ctrl+-` zoom |
+| Explorer (sidebar focused) | click / `Enter` open file or open/close folder, `F2` rename in place, `Del` delete to the Recycle Bin, `Shift+Del` delete permanently, `Ctrl+X` / `Ctrl+C` / `Ctrl+V` cut / copy / paste files, drag onto a folder to move (`Ctrl`+drag copies) |
+
+### Look
+
+DevPad uses a modern dark theme (`Theme.h`): neutral chrome around a slightly lighter editor, a blue accent
+taken from the app icon, rounded inputs and menus, thin scroll bars, and a dark title bar on Windows. Every
+icon is drawn in code by `Icons.h`, so there are no image files and icons stay sharp at any screen scale. The
+Explorer and the tabs show a coloured badge per file type. The activity bar on the far left has Explorer,
+Find, Go to File and Keyboard Shortcuts. Code uses Cascadia Code / Cascadia Mono when installed (Windows 11),
+otherwise JetBrains Mono, Fira Code or Consolas.
+
+### Welcome page
+
+When no file is open (at start-up without a session, or after closing the last tab) DevPad shows a welcome
+page instead of an empty editor: New File / Open File / Open Folder / Go to File, the recently used folders
+and files (kept in the settings, missing ones are skipped), and the handiest shortcuts.
+
+### File manager (left sidebar)
+
+The Explorer sidebar is a small file manager for the open folder:
+
+- **Toolbar:** new file, new folder, refresh, collapse all. The header shows the folder name.
+- **Filter box:** searches every file below the folder with the same fuzzy ranking as `Ctrl+P` (`Workspace.h`).
+- **Right-click menu:** open, new file / folder, cut / copy / paste, duplicate (`name copy.ext`), copy path, copy relative path, reveal in File Explorer, rename, delete.
+- **Drag and drop:** drag onto a folder to move, `Ctrl`+drag to copy, or drop files in from Windows Explorer.
+- **Open tabs follow the files.** Renaming or moving a file or folder updates the tabs' paths and keeps unsaved edits and undo history. Deleting closes the tabs, after a warning if they have unsaved changes.
+- **The active tab's file is selected in the tree**, opening its folders as needed.
+
+Every operation is in the engine (`FileIO.h`: `checkFileName`, `createFile`, `createFolder`, `renamePath`,
+`movePath`, `copyPath`, `isSameOrInside`), tested in `engine_tests` ("File manager"). Nothing is ever
+overwritten, and a folder cannot be moved or copied into itself. Deleting goes to the Recycle Bin, with
+an offer to delete permanently when the drive has none.
 
 ### Where the data structures are used
 
@@ -248,6 +286,8 @@ key presses into engine calls.
 | Autocomplete popup | Trie (dictionary + words of the document) | O(prefix + k) |
 | Ctrl+P file search | dynamic-programming subsequence score, top-k kept in a small sorted array | O(files x query x name length), never sorts the whole list |
 | Rename file | validates the name (no folders, no Windows-forbidden characters, never overwrites), keeps text and undo history | O(1) |
+| Explorer filter | same fuzzy score + top-k as Ctrl+P over the cached file list | O(files x query x name length) |
+| Explorer move / rename of a folder with open tabs | each tab's path is compared with the folder path (prefix test) | O(tabs x path length) |
 | Line endings | the engine text has no `\r`; CRLF files are written back as CRLF | O(n) on open / save |
 
 ## Complexity (phase 1)

@@ -58,18 +58,40 @@ if(BUILD_GUI)
       gui/MainWindow.cpp
       gui/MainWindow.h
       gui/CodeView.cpp
-      gui/CodeView.h)
+      gui/CodeView.h
+      gui/FileExplorer.cpp
+      gui/FileExplorer.h
+      gui/WelcomePage.cpp
+      gui/WelcomePage.h
+      gui/Icons.cpp
+      gui/Icons.h
+      gui/Theme.cpp
+      gui/Theme.h
+      gui/WinTheme.cpp
+      gui/WinTheme.h)
     set_target_properties(devpad PROPERTIES AUTOMOC ON)
     target_include_directories(devpad PRIVATE gui)
     target_link_libraries(devpad PRIVATE engine Qt${QT_VERSION_MAJOR}::Widgets)
+    if(WIN32)
+      # dark title bars (dwmapi) and the program icon shown by Explorer / the taskbar
+      target_link_libraries(devpad PRIVATE dwmapi)
+      enable_language(RC)
+      set(DEVPAD_ICON "${CMAKE_CURRENT_SOURCE_DIR}/gui/devpad.ico")
+      configure_file(gui/devpad.rc.in "${CMAKE_CURRENT_BINARY_DIR}/devpad.rc" @ONLY)
+      target_sources(devpad PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/devpad.rc")
+    endif()
 
     # GUI smoke tests: drive the real widgets without a screen (QT_QPA_PLATFORM=offscreen)
     find_package(Qt${QT_VERSION_MAJOR} QUIET COMPONENTS Test)
     if(Qt${QT_VERSION_MAJOR}Test_FOUND)
-      add_executable(gui_tests tests/gui_test.cpp gui/MainWindow.cpp gui/MainWindow.h gui/CodeView.cpp gui/CodeView.h)
+      add_executable(gui_tests tests/gui_test.cpp gui/MainWindow.cpp gui/MainWindow.h gui/CodeView.cpp gui/CodeView.h gui/FileExplorer.cpp gui/FileExplorer.h gui/WelcomePage.cpp gui/WelcomePage.h
+                             gui/Icons.cpp gui/Icons.h gui/Theme.cpp gui/Theme.h gui/WinTheme.cpp gui/WinTheme.h)
       set_target_properties(gui_tests PROPERTIES AUTOMOC ON)
       target_include_directories(gui_tests PRIVATE gui)
       target_link_libraries(gui_tests PRIVATE engine Qt${QT_VERSION_MAJOR}::Widgets Qt${QT_VERSION_MAJOR}::Test)
+      if(WIN32)
+        target_link_libraries(gui_tests PRIVATE dwmapi)
+      endif()
       add_test(NAME gui_tests COMMAND gui_tests)
       set_tests_properties(gui_tests PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
     endif()

@@ -8,7 +8,15 @@
 #include <QTemporaryDir>
 #include <QTest>
 #include <iostream>
+#include <QFileSystemModel>
+#include <QMimeData>
+#include <QTreeView>
+#include <QUrl>
 #include "CodeView.h"
+#include "FileExplorer.h"
+#include "WelcomePage.h"
+#include <QSettings>
+#include <QSignalSpy>
 #include "MainWindow.h"
 
 static int g_checks = 0, g_failed = 0;
@@ -81,6 +89,21 @@ static void testTyping() {
     CHECK_EQ(txt(&v), QString("(\"{abc}\") def\n"));
     v.undo(); v.undo(); v.undo();
     CHECK_EQ(txt(&v), QString("abc def\n"));            // each wrap was one undo step
+    v.select(Pos{0, 0}, Pos{0, 3});
+    type(&v, "(");
+    type(&v, "(");                                      // the same bracket again removes it
+    CHECK_EQ(txt(&v), QString("abc def\n"));
+    CHECK_EQ(v.selectedText(), QString("abc"));
+    type(&v, "'");
+    type(&v, "'");                                      // quotes too
+    CHECK_EQ(txt(&v), QString("abc def\n"));
+    type(&v, "[");
+    type(&v, "]");                                      // and the closing bracket
+    CHECK_EQ(txt(&v), QString("abc def\n"));
+    CHECK_EQ(v.selectedText(), QString("abc"));
+    type(&v, "(");
+    v.undo();                                           // unwrap... and back: one undo step each
+    CHECK_EQ(txt(&v), QString("abc def\n"));
     v.select(Pos{0, 4}, Pos{0, 7});
     type(&v, "[");
     CHECK_EQ(txt(&v), QString("abc [def]\n"));
@@ -267,7 +290,9 @@ static void testTabsAndFiles() {
     w.show();
     QApplication::setActiveWindow(&w);
     (void)QTest::qWaitForWindowActive(&w);
-    CHECK(w.tabCount() == 1);
+    CHECK(w.tabCount() == 0 && w.welcomeShown());      // nothing open: the welcome page
+    w.newTab();
+    CHECK(w.tabCount() == 1 && !w.welcomeShown());
     CHECK(w.openPath(a));                               // replaces the untouched Untitled tab
     CHECK(w.tabCount() == 1 && w.tabTitle(0) == "a.cpp");
     CHECK(w.openPath(b));
@@ -356,7 +381,8 @@ static void testTabsAndFiles() {
     CHECK(w.tabCount() == 2);
     CHECK(w.closeTab(1, true));
     CHECK(w.closeTab(0, true));
-    CHECK(w.tabCount() == 1);                           // there is always one tab
+    CHECK(w.tabCount() == 0 && w.welcomeShown());      // the last tab closed: welcome page again
+    CHECK(w.recentFiles().contains(dir.filePath("beta.cpp")));
 
     // window picture for a quick look at the result
     w.openPath(dir.filePath("beta.cpp"));
@@ -366,9 +392,198 @@ static void testTabsAndFiles() {
     if (!shot.isEmpty()) w.grab().save(shot);
 }
 
+// the file tree loads folders in the background: wait (at most 3 s) until 'ready' says yes
+template <class F> static void waitFor(F ready) {
+    for (int i = 0; i < 60 && !ready(); ++i) QTest::qWait(50);
+}
+
+static void testExplorer() {
+    std::cout << "[file manager sidebar]\n";
+    QTemporaryDir tmp;
+    CHECK(tmp.isValid());
+    const QString root = QFileInfo(tmp.path()).canonicalFilePath();
+    QDir(root).mkpath("src");
+    auto write = [&](const QString& rel, const char* body) {
+        QFile f(QDir(root).filePath(rel));
+        f.open(QIODevice::WriteOnly);
+        f.write(body);
+        return QDir(root).filePath(rel);
+    };
+    const QString mainCpp = write("src/main.cpp", "int main() {}\n");
+    const QString notes = write("notes.txt", "hello\n");
+    auto at = [&](const QString& rel) { return QDir(root).filePath(rel); };
+    auto pathOf = [](CodeView* v) { return QString::fromStdString(v->editor().doc().path()); };
+
+    MainWindow w;
+    w.show();
+    QApplication::setActiveWindow(&w);
+    (void)QTest::qWaitForWindowActive(&w);
+    FileExplorer* ex = w.explorer();
+    CHECK(ex != nullptr && ex->root().isEmpty());
+    w.setWorkspaceRoot(root);
+    CHECK(ex->root() == root);
+    CHECK(ex->tree()->rootIndex() == ex->model()->index(root));
+
+    // new file / new folder
+    QString err;
+    const QString created = ex->createFile(root, "todo.md", &err);
+    CHECK(created == at("todo.md") && QFile::exists(created));
+    CHECK(ex->createFile(root, "todo.md", &err).isEmpty() && !err.isEmpty());      // taken
+    CHECK(ex->createFile(root, "a?b", &err).isEmpty());
+    CHECK(ex->createFolder(root, "docs", &err) == at("docs") && QFileInfo(at("docs")).isDir());
+
+    // reveal: opening a file selects it in the tree
+    CHECK(w.openPath(notes));
+    CHECK(ex->currentPath() == notes);
+    CHECK(ex->targetFolder() == root);
+
+    // renaming an open file with unsaved edits: the tab follows, the edits stay
+    type(w.currentView(), "x");
+    CHECK(w.currentView()->editor().doc().modified());
+    CHECK(ex->unsavedCount && ex->unsavedCount(root) == 1 && ex->unsavedCount(at("src")) == 0);
+    CHECK(ex->renamePath(notes, "memo.txt", &err) == at("memo.txt"));
+    CHECK(QFile::exists(at("memo.txt")) && !QFile::exists(notes));
+    CHECK(pathOf(w.currentView()) == at("memo.txt") && w.tabTitle(0).startsWith("memo.txt"));
+    CHECK(w.currentView()->editor().doc().modified() && txt(w.currentView()) == "xhello\n");
+    QTest::keyClick(w.currentView(), Qt::Key_S, Qt::ControlModifier);
+    { QFile f(at("memo.txt")); f.open(QIODevice::ReadOnly); CHECK(f.readAll() == "xhello\n"); }
+    CHECK(ex->renamePath(at("memo.txt"), "todo.md", &err).isEmpty() && !err.isEmpty());   // would overwrite
+
+    // renaming a folder moves the open tabs inside it
+    CHECK(w.openPath(mainCpp));
+    CHECK(ex->targetFolder() == at("src"));
+    CHECK(ex->renamePath(at("src"), "code", &err) == at("code"));
+    CHECK(pathOf(w.currentView()) == at("code/main.cpp") && QFile::exists(at("code/main.cpp")));
+
+    // moving (also what drag and drop does)
+    CHECK(ex->movePath(at("memo.txt"), at("docs"), &err) == at("docs/memo.txt"));
+    CHECK(pathOf(w.viewAt(0)) == at("docs/memo.txt"));
+    CHECK(ex->movePath(at("docs"), at("docs"), &err).isEmpty());                   // into itself
+
+    // duplicate, copy / paste, cut / paste
+    CHECK(ex->copyPath(at("todo.md"), root, &err) == at("todo copy.md"));
+    ex->setClipboard({at("todo.md")}, false);
+    QStringList errors;
+    CHECK(ex->paste(at("code"), &errors) == QStringList{at("code/todo.md")} && errors.isEmpty());
+    CHECK(ex->canPaste() && QFile::exists(at("todo.md")));                          // copy keeps the original
+    ex->setClipboard({at("docs/memo.txt")}, true);
+    CHECK(ex->paste(root, &errors) == QStringList{at("memo.txt")});
+    CHECK(!ex->canPaste() && !QFile::exists(at("docs/memo.txt")));                  // cut moves it
+    CHECK(pathOf(w.viewAt(0)) == at("memo.txt"));
+
+    // inline rename through the model (F2 in the tree), done a moment later
+    QModelIndex idx = ex->model()->index(at("memo.txt"));
+    CHECK(idx.isValid());
+    CHECK(ex->model()->setData(idx, "renamed.txt", Qt::EditRole));
+    QTest::qWait(50);
+    CHECK(QFile::exists(at("renamed.txt")) && pathOf(w.viewAt(0)) == at("renamed.txt"));
+
+    // drag and drop onto a folder = move
+    QMimeData drag;
+    drag.setUrls({QUrl::fromLocalFile(at("renamed.txt"))});
+    CHECK(ex->model()->dropMimeData(&drag, Qt::MoveAction, -1, -1, ex->model()->index(at("code"))));
+    QTest::qWait(50);
+    CHECK(QFile::exists(at("code/renamed.txt")) && pathOf(w.viewAt(0)) == at("code/renamed.txt"));
+
+    // filter: fuzzy search over every file below the folder
+    ex->setFilterText("mainc");
+    CHECK(ex->filterMatches().value(0) == "code/main.cpp");
+    ex->setFilterText("zzzz");
+    CHECK(ex->filterMatches().isEmpty());
+    ex->setFilterText("");
+    CHECK(ex->filterMatches().isEmpty() && ex->tree()->isVisible());
+
+    // refresh rebuilds the tree and keeps the selection and the open folders
+    ex->reveal(at("code/main.cpp"));
+    CHECK(ex->tree()->isExpanded(ex->model()->index(at("code"))));
+    ex->refresh();
+    CHECK(ex->tree()->rootIndex() == ex->model()->index(root));
+    CHECK(ex->currentPath() == at("code/main.cpp"));
+    CHECK(ex->tree()->isExpanded(ex->model()->index(at("code"))));
+
+    // a file deep in folders that were never opened is revealed once they have loaded
+    QDir(root).mkpath("deep/er/est");
+    const QString deep = write("deep/er/est/leaf.cpp", "// leaf\n");
+    w.openPath(deep);
+    waitFor([&]() { return ex->currentPath() == deep; });
+    CHECK(ex->currentPath() == deep);
+    ex->refresh();                                         // nested open folders come back too
+    waitFor([&]() { return ex->tree()->isExpanded(ex->model()->index(at("deep/er/est"))); });
+    CHECK(ex->tree()->isExpanded(ex->model()->index(at("deep/er/est"))) && ex->currentPath() == deep);
+    w.closeTab(w.tabCount() - 1, true);
+
+    // deleting a folder closes the tabs inside it (permanently here: tests do not fill the Recycle Bin)
+    const int before = w.tabCount();
+    CHECK(before == 2);
+    CHECK(ex->removePath(at("code"), true, &err));
+    CHECK(!QFileInfo::exists(at("code")) && w.tabCount() == 0 && w.welcomeShown());
+    CHECK(!ex->removePath(at("code"), true, &err) && !err.isEmpty());
+    CHECK(QFile::exists(at("todo.md")) && QFile::exists(at("todo copy.md")));
+
+    const QString shot = qEnvironmentVariable("DEVPAD_EXPLORER_SCREENSHOT");
+    if (!shot.isEmpty()) {
+        ex->createFolder(root, "engine", &err);
+        write("engine/Trie.cpp", "// trie\n");
+        write("engine/Search.cpp", "// kmp\n");
+        write("README.md", "# DevPad\n");
+        w.openPath(at("engine/Trie.cpp"));
+        w.resize(1000, 600);
+        waitFor([&]() { return ex->currentPath() == at("engine/Trie.cpp"); });
+        waitFor([&]() { return ex->model()->index(at("README.md")).isValid() && !ex->model()->index(at("code")).isValid(); });
+        w.grab().save(shot);
+    }
+    for (int i = w.tabCount() - 1; i >= 0; --i) w.closeTab(i, true);
+}
+
+static void testWelcome() {
+    std::cout << "[welcome page]\n";
+    QTemporaryDir tmp;
+    const QString root = QFileInfo(tmp.path()).canonicalFilePath();
+    QFile f(QDir(root).filePath("hello.cpp"));
+    f.open(QIODevice::WriteOnly);
+    f.write("int x;\n");
+    f.close();
+    const QString file = QDir(root).filePath("hello.cpp");
+
+    MainWindow w;
+    w.show();
+    WelcomePage* page = w.welcome();
+    CHECK(w.welcomeShown() && page->isVisible() && w.tabCount() == 0);
+    CHECK(page->shownRecent().isEmpty());              // fresh settings: nothing recent yet
+
+    // the links
+    QSignalSpy keys(page, &WelcomePage::shortcutsRequested);
+    page->activate("new");
+    CHECK(w.tabCount() == 1 && !w.welcomeShown());
+    CHECK(w.closeTab(0, true) && w.welcomeShown());
+    page->activate("file:" + file);                     // a recent file opens in a tab
+    CHECK(w.tabCount() == 1 && w.tabTitle(0) == "hello.cpp");
+    w.closeTab(0, true);
+    CHECK(page->shownRecent().contains(file));         // and is listed when the page comes back
+    page->activate("folder:" + root);
+    CHECK(w.workspaceRoot() == root && w.recentFolders().value(0) == root);
+    page->activate("folder:" + root + "/missing");     // gone meanwhile: nothing happens
+    CHECK(w.workspaceRoot() == root && w.welcomeShown());
+    QFile::remove(file);
+    page->setRecent(w.recentFiles(), w.recentFolders());
+    CHECK(!page->shownRecent().contains(file) && page->shownRecent().contains(root));   // deleted files drop out
+
+    // status bar items only make sense with a file open
+    const QString shot = qEnvironmentVariable("DEVPAD_WELCOME_SCREENSHOT");
+    if (!shot.isEmpty()) {
+        w.resize(1100, 680);
+        QTest::qWait(200);
+        w.grab().save(shot);
+    }
+}
+
 int main(int argc, char** argv) {
     qputenv("QT_QPA_PLATFORM", qEnvironmentVariableIsSet("QT_QPA_PLATFORM") ? qgetenv("QT_QPA_PLATFORM") : QByteArray("offscreen"));
     QApplication app(argc, argv);
+    // own settings, so running the tests never touches DevPad's real session or recent lists
+    QApplication::setOrganizationName("DevPadTests");
+    QApplication::setApplicationName("DevPadTests");
+    QSettings().clear();
     testTyping();
     testEnterTabAndBackspace();
     testLineCommands();
@@ -376,6 +591,9 @@ int main(int argc, char** argv) {
     testAutocomplete();
     testBracketReport();
     testTabsAndFiles();
+    testExplorer();
+    testWelcome();
+    QSettings().clear();
     std::cout << (g_checks - g_failed) << "/" << g_checks << " GUI checks passed";
     if (g_failed) std::cout << "  (" << g_failed << " FAILED)";
     std::cout << std::endl;

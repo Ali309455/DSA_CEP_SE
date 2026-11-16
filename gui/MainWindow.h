@@ -1,7 +1,7 @@
 // MainWindow.h - DevPad's main window (phase 5, Qt Widgets).
 //
 // Tabs (one CodeView each), menus + keyboard shortcuts, find / replace bar, Quick Open
-// (Ctrl+P), file tree sidebar, rename file (F2), session restore. All text editing and all
+// (Ctrl+P), file manager sidebar (FileExplorer), rename file (F2), session restore. All text editing and all
 // searching is done by the engine; this class wires it to the user interface.
 #pragma once
 #include <QMainWindow>
@@ -13,12 +13,13 @@ class CodeView;
 class QTabWidget;
 class QLineEdit;
 class QCheckBox;
+class QToolButton;
 class QLabel;
 class QDockWidget;
-class QFileSystemModel;
-class QTreeView;
-class QModelIndex;
 class QPushButton;
+class FileExplorer;
+class WelcomePage;
+class QStackedWidget;
 
 class MainWindow : public QMainWindow {
     Q_OBJECT
@@ -44,6 +45,12 @@ public:
     QLineEdit* findField() const { return find_; }
     QLabel* findCount() const { return findCount_; }
     QString workspaceRoot() const { return root_; }
+    FileExplorer* explorer() const { return explorer_; }
+    WelcomePage* welcome() const { return welcome_; }
+    bool welcomeShown() const;                             // true when no file is open
+    void addRecentFolder(const QString& dir);
+    QStringList recentFiles() const;
+    QStringList recentFolders() const;
 
 protected:
     void closeEvent(QCloseEvent*) override;
@@ -61,7 +68,8 @@ private slots:
     void renameDialog();
     void quickOpen();
     void goToLineDialog();
-    void onTreeActivated(const QModelIndex& idx);
+    void onPathRenamed(const QString& oldPath, const QString& newPath);
+    void onPathRemoved(const QString& path);
     void updateFind();
     void replaceOne();
     void replaceEverything();
@@ -70,14 +78,18 @@ private slots:
 private:
     QTabWidget* tabs_ = nullptr;
     QDockWidget* dock_ = nullptr;
-    QTreeView* tree_ = nullptr;
-    QFileSystemModel* fsModel_ = nullptr;
+    FileExplorer* explorer_ = nullptr;
+    WelcomePage* welcome_ = nullptr;
+    QStackedWidget* centralStack_ = nullptr;               // welcome page or the editor (tabs + find bar)
+    QWidget* editorArea_ = nullptr;
+    QLabel* encLabel_ = nullptr;
+    QAction* shortcutsAct_ = nullptr;
     QWidget* findBar_ = nullptr;
     QLineEdit* find_ = nullptr;
     QLineEdit* repl_ = nullptr;
     QWidget* replRow_ = nullptr;
-    QCheckBox* caseBox_ = nullptr;
-    QCheckBox* wordBox_ = nullptr;
+    QToolButton* caseBox_ = nullptr;
+    QToolButton* wordBox_ = nullptr;
     QLabel* findCount_ = nullptr;
     QLabel* posLabel_ = nullptr;
     QLabel* langLabel_ = nullptr;
@@ -87,6 +99,9 @@ private:
     int untitled_ = 0;
 
     void buildActions();
+    void buildActivityBar();
+    void updateCentral();                                  // welcome page when there are no tabs
+    void addRecent(const char* key, const QString& path);
     void buildFindBar();
     void applyDarkTheme();
     void refreshTab(CodeView* v);

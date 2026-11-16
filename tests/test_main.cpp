@@ -1951,6 +1951,39 @@ static void testSmartTyping() {
     CHECK_THROWS(surroundSelection(e, Pos{0, 2}, Pos{7, 0}, '('));
     CHECK(text(e.doc()) == "alpha beta\ngamma" && e.undoCount() == steps);   // nothing half-done
 
+    // toggle: the same bracket / quote again removes the pair
+    bool changed = false;
+    r = toggleSurround(e, Pos{0, 6}, Pos{0, 10}, '(', &changed);
+    CHECK(changed && text(e.doc()) == "alpha (beta)\ngamma");
+    CHECK(isWrappedBy(e.doc(), r.start, r.end, '(') && isWrappedBy(e.doc(), r.end, r.start, ')'));
+    CHECK(!isWrappedBy(e.doc(), r.start, r.end, '[') && !isWrappedBy(e.doc(), r.start, r.end, '"'));
+    steps = e.undoCount();
+    r = toggleSurround(e, r.start, r.end, '(', &changed);
+    CHECK(changed && text(e.doc()) == "alpha beta\ngamma" && e.doc().getRange(r.start, r.end) == "beta");
+    CHECK(e.undoCount() == steps + 1);                     // one undo step
+    e.undo();
+    CHECK(text(e.doc()) == "alpha (beta)\ngamma");
+    r = toggleSurround(e, Pos{0, 7}, Pos{0, 11}, ')', &changed);   // the closer removes it too
+    CHECK(changed && text(e.doc()) == "alpha beta\ngamma" && e.doc().getRange(r.start, r.end) == "beta");
+    r = toggleSurround(e, r.start, r.end, ')', &changed);           // closer, nothing to remove: no change
+    CHECK(!changed && text(e.doc()) == "alpha beta\ngamma");
+    r = toggleSurround(e, Pos{0, 6}, Pos{0, 10}, '"');
+    r = toggleSurround(e, r.start, r.end, '(');                      // different pairs nest
+    CHECK(text(e.doc()) == "alpha \"(beta)\"\ngamma");
+    r = toggleSurround(e, r.start, r.end, '"');                      // not directly around: wraps again
+    CHECK(text(e.doc()) == "alpha \"(\"beta\")\"\ngamma");
+    r = toggleSurround(e, r.start, r.end, '"');
+    r = toggleSurround(e, r.start, r.end, '(');
+    r = toggleSurround(e, r.start, r.end, '"');
+    CHECK(text(e.doc()) == "alpha beta\ngamma" && e.doc().getRange(r.start, r.end) == "beta");
+    r = toggleSurround(e, Pos{0, 2}, Pos{1, 3}, '{');                // across lines, both ways
+    CHECK(text(e.doc()) == "al{pha beta\ngam}ma");
+    r = toggleSurround(e, r.end, r.start, '}');
+    CHECK(text(e.doc()) == "alpha beta\ngamma" && e.doc().getRange(r.start, r.end) == "pha beta\ngam");
+    CHECK(!isWrappedBy(e.doc(), Pos{0, 0}, Pos{0, 5}, '('));        // line edges
+    CHECK(!isWrappedBy(e.doc(), Pos{0, 1}, Pos{1, 5}, '(') && !isWrappedBy(e.doc(), Pos{0, 1}, Pos{9, 0}, '('));
+    CHECK_THROWS(unwrapSelection(e, Pos{0, 1}, Pos{0, 3}, '('));
+
     // smart Enter
     Editor n;
     n.insertText(Pos{0, 0}, "    if (x) {");
@@ -2138,6 +2171,76 @@ static void testRenameFile() {
     fs::remove_all(root);
 }
 
+static void testFileManager() {
+    section("File manager: create / rename / move / copy");
+    namespace fs = std::filesystem;
+    const fs::path root = "engine_test_fm_tmp";
+    fs::remove_all(root);
+    fs::create_directories(root / "src");
+    std::ofstream(root / "src" / "main.cpp") << "int main(){}";
+    const std::string R = root.generic_string();
+    std::string np;
+
+    // names
+    CHECK(checkFileName("notes.txt").ok && checkFileName(".gitignore").ok && checkFileName("My File 2").ok);
+    const char* bad[] = {"", ".", "..", "a/b", "a\\b", "q?", "p|q", "c:x", "<x>", "end.", "end ", "tab\there"};
+    for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); ++i) CHECK(!checkFileName(bad[i]).ok);
+    CHECK(!checkFileName(std::string(256, 'n')).ok);
+
+    // create
+    CHECK(createFile(R, "readme.md", &np).ok && np == R + "/readme.md" && fs::is_regular_file(root / "readme.md"));
+    CHECK(fs::file_size(root / "readme.md") == 0);
+    CHECK(!createFile(R, "readme.md").ok);                          // taken
+    CHECK(!createFile(R, "src").ok);                                // a folder has that name
+    CHECK(!createFile(R, "a/b.txt").ok && !fs::exists(root / "a"));
+    CHECK(!createFile(R + "/nope", "x.txt").ok);                    // no such folder
+    CHECK(createFolder(R, "docs", &np).ok && np == R + "/docs" && fs::is_directory(root / "docs"));
+    CHECK(!createFolder(R, "docs").ok && !createFolder(R, "readme.md").ok);
+    CHECK(createFile(R + "/", "x.txt", &np).ok && np == R + "/x.txt");   // trailing separator: no doubled '/'
+
+    // rename files and folders
+    CHECK(renamePath(R + "/docs", "doc", &np).ok && np == R + "/doc" && fs::is_directory(root / "doc"));
+    CHECK(!renamePath(R + "/doc", "src").ok && fs::is_directory(root / "doc"));
+    CHECK(renamePath(R + "/x.txt", "y.txt", &np).ok && fs::exists(root / "y.txt") && !fs::exists(root / "x.txt"));
+    CHECK(renamePath(R + "/y.txt", "y.txt").ok);                    // same name
+    CHECK(!renamePath(R + "/gone.txt", "z.txt").ok);
+    CHECK(!renamePath(R + "/y.txt", "bad?.txt").ok);
+
+    // move
+    CHECK(movePath(R + "/y.txt", R + "/doc", &np).ok && np == R + "/doc/y.txt");
+    CHECK(fs::exists(root / "doc" / "y.txt") && !fs::exists(root / "y.txt"));
+    CHECK(movePath(R + "/doc/y.txt", R + "/doc", &np).ok && np == R + "/doc/y.txt");   // its own folder: no change
+    std::ofstream(root / "y.txt") << "other";
+    CHECK(!movePath(R + "/y.txt", R + "/doc").ok && fs::exists(root / "y.txt"));        // never overwrite
+    CHECK(!movePath(R + "/doc", R + "/doc").ok);                                        // into itself
+    fs::create_directories(root / "doc" / "inner");
+    CHECK(!movePath(R + "/doc", R + "/doc/inner").ok && fs::is_directory(root / "doc"));
+    CHECK(movePath(R + "/doc", R + "/src", &np).ok && np == R + "/src/doc" && fs::exists(root / "src" / "doc" / "y.txt"));
+    CHECK(!movePath(R + "/nothing", R + "/src").ok && !movePath(R + "/y.txt", R + "/nothing").ok);
+
+    // copy / duplicate
+    CHECK(copyName("a.txt", 1) == "a copy.txt" && copyName("a.txt", 2) == "a copy 2.txt");
+    CHECK(copyName(".gitignore", 1) == ".gitignore copy" && copyName("Makefile", 3) == "Makefile copy 3");
+    CHECK(copyName("x.tar.gz", 1) == "x.tar copy.gz");
+    CHECK(copyPath(R + "/y.txt", R, &np).ok && np == R + "/y copy.txt");                // duplicate in place
+    CHECK(copyPath(R + "/y.txt", R, &np).ok && np == R + "/y copy 2.txt");
+    { std::ifstream in(root / "y copy 2.txt"); std::string t; in >> t; CHECK(t == "other"); }
+    CHECK(copyPath(R + "/src", R + "/backup_dest_missing").ok == false);
+    CHECK(createFolder(R, "backup").ok);
+    CHECK(copyPath(R + "/src", R + "/backup", &np).ok && np == R + "/backup/src");
+    CHECK(fs::exists(root / "backup" / "src" / "main.cpp") && fs::exists(root / "backup" / "src" / "doc" / "y.txt"));
+    CHECK(fs::exists(root / "src" / "main.cpp"));                                       // the original stays
+    CHECK(!copyPath(R + "/src", R + "/src/doc").ok);                                    // into itself
+    CHECK(copyPath(R + "/src", R, &np).ok && np == R + "/src copy" && fs::exists(root / "src copy" / "main.cpp"));
+
+    // inside
+    CHECK(isSameOrInside(R + "/src/doc/y.txt", R + "/src") && isSameOrInside(R + "/src", R + "/src/"));
+    CHECK(isSameOrInside(R + "/src/../src/main.cpp", R + "/src"));
+    CHECK(!isSameOrInside(R + "/src copy/main.cpp", R + "/src") && !isSameOrInside(R, R + "/src"));
+    CHECK(isSameOrInside(R + "/src/not_yet.txt", R + "/src"));                          // need not exist
+    fs::remove_all(root);
+}
+
 int main() {
     testDynArray();
     testStack();
@@ -2189,6 +2292,7 @@ int main() {
     testFuzzy();
     testListFiles();
     testRenameFile();
+    testFileManager();
 
     std::cout << "\n" << (g_checks - g_failed) << "/" << g_checks << " checks passed";
     if (g_failed) std::cout << "  (" << g_failed << " FAILED)";
