@@ -68,7 +68,17 @@ if(BUILD_GUI)
       gui/Theme.cpp
       gui/Theme.h
       gui/WinTheme.cpp
-      gui/WinTheme.h)
+      gui/WinTheme.h
+      gui/Runner.cpp gui/Runner.h gui/Settings.cpp
+      gui/Settings.h
+      gui/Controls.cpp
+      gui/Controls.h
+      gui/SettingsDialog.cpp
+      gui/SettingsDialog.h
+      gui/ShortcutsDialog.cpp
+      gui/ShortcutsDialog.h
+      gui/TerminalPanel.cpp
+      gui/TerminalPanel.h)
     set_target_properties(devpad PROPERTIES AUTOMOC ON)
     target_include_directories(devpad PRIVATE gui)
     target_link_libraries(devpad PRIVATE engine Qt${QT_VERSION_MAJOR}::Widgets)
@@ -85,7 +95,8 @@ if(BUILD_GUI)
     find_package(Qt${QT_VERSION_MAJOR} QUIET COMPONENTS Test)
     if(Qt${QT_VERSION_MAJOR}Test_FOUND)
       add_executable(gui_tests tests/gui_test.cpp gui/MainWindow.cpp gui/MainWindow.h gui/CodeView.cpp gui/CodeView.h gui/FileExplorer.cpp gui/FileExplorer.h gui/WelcomePage.cpp gui/WelcomePage.h
-                             gui/Icons.cpp gui/Icons.h gui/Theme.cpp gui/Theme.h gui/WinTheme.cpp gui/WinTheme.h)
+                             gui/Icons.cpp gui/Icons.h gui/Theme.cpp gui/Theme.h gui/WinTheme.cpp gui/WinTheme.h
+                             gui/Runner.cpp gui/Runner.h gui/Settings.cpp gui/Settings.h gui/Controls.cpp gui/Controls.h gui/SettingsDialog.cpp gui/SettingsDialog.h gui/ShortcutsDialog.cpp gui/ShortcutsDialog.h gui/TerminalPanel.cpp gui/TerminalPanel.h)
       set_target_properties(gui_tests PROPERTIES AUTOMOC ON)
       target_include_directories(gui_tests PRIVATE gui)
       target_link_libraries(gui_tests PRIVATE engine Qt${QT_VERSION_MAJOR}::Widgets Qt${QT_VERSION_MAJOR}::Test)

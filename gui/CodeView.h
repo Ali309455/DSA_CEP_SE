@@ -15,6 +15,7 @@
 #include "Brackets.h"
 #include "EditOps.h"
 #include "Editor.h"
+#include "Settings.h"
 
 class QListWidget;
 
@@ -109,6 +110,7 @@ private:
     std::string comment_ = "//";
     int language_ = 0;                   // 0 C-like, 1 hash-comment, 2 plain
     int zoom_ = 11;
+    QString fontFamily_;                 // empty: automatic (from the settings)
     int tabWidth_ = 4;
     int charW_ = 8, lineH_ = 18, gutterW_ = 50;
     int maxCols_ = 0;                    // widest line seen so far (display columns)
@@ -123,6 +125,10 @@ private:
     size_t blockValid_ = 0;              // blockAtStart_[0 .. blockValid_) are up to date
     QListWidget* popup_ = nullptr;
     bool lastModified_ = false;
+
+    // the user's preferences (Settings window): font, tabs, cursor, what is drawn
+    void applySettings();
+    const AppSettings::Values& prefs() const { return AppSettings::instance().values(); }
 
     // geometry
     void applyFont();

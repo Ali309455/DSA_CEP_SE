@@ -1,6 +1,7 @@
 #include "Icons.h"
 
 #include <QFileInfo>
+#include <cmath>
 #include <QFont>
 #include <QFontMetricsF>
 #include <QHash>
@@ -148,6 +149,55 @@ void paintGlyph(QPainter& p, Glyph g, const QColor& c) {
         case Check:
             path.moveTo(5, 12.5); path.lineTo(10, 17.5); path.lineTo(19, 7);
             p.drawPath(path);
+            break;
+        case Terminal:    // prompt chevron and cursor bar (no frame, so it differs from the command palette icon)
+            path.moveTo(4.5, 6.5); path.lineTo(11.5, 12); path.lineTo(4.5, 17.5);
+            p.drawPath(path);
+            line(13, 18, 20, 18);
+            break;
+        case Gear: {      // cog: ring with eight teeth, hole in the middle
+            p.drawEllipse(QPointF(12, 12), 3.2, 3.2);
+            p.drawEllipse(QPointF(12, 12), 6.6, 6.6);
+            for (int i = 0; i < 8; ++i) {
+                const qreal a = i * 3.14159265358979 / 4;
+                line(12 + std::cos(a) * 6.6, 12 + std::sin(a) * 6.6, 12 + std::cos(a) * 9.4, 12 + std::sin(a) * 9.4);
+            }
+            break;
+        }
+        case Trash:
+            line(4.5, 7, 19.5, 7);
+            path.moveTo(9, 7); path.lineTo(9, 4.5); path.lineTo(15, 4.5); path.lineTo(15, 7);
+            path.moveTo(6.5, 7); path.lineTo(7.5, 20); path.lineTo(16.5, 20); path.lineTo(17.5, 7);
+            p.drawPath(path);
+            line(10.2, 10.5, 10.2, 16.5);
+            line(13.8, 10.5, 13.8, 16.5);
+            break;
+        case Stop:
+            p.drawRoundedRect(QRectF(6, 6, 12, 12), 2.5, 2.5);
+            break;
+        case Editor:      // text lines with a caret
+            line(4.5, 7, 19.5, 7);
+            line(4.5, 12, 14, 12);
+            line(4.5, 17, 17, 17);
+            break;
+        case Brush:       // palette blob with dots
+            path.moveTo(12, 3.5);
+            path.cubicTo(6.5, 3.5, 3, 7.5, 3, 12);
+            path.cubicTo(3, 17, 7, 20.5, 11.5, 20.5);
+            path.cubicTo(14, 20.5, 14.5, 18.5, 13.5, 17);
+            path.cubicTo(12.5, 15.5, 13.5, 14, 15.5, 14);
+            path.lineTo(18, 14);
+            path.cubicTo(20, 14, 21, 12.5, 21, 11.5);
+            path.cubicTo(21, 7, 17, 3.5, 12, 3.5);
+            p.drawPath(path);
+            line(7.5, 11, 7.51, 11); line(10.5, 7.5, 10.51, 7.5); line(15, 8, 15.01, 8);
+            break;
+        case Play:
+            path.moveTo(7.5, 5); path.lineTo(18.5, 12); path.lineTo(7.5, 19); path.closeSubpath();
+            p.drawPath(path);
+            break;
+        case Plus:
+            plus(12, 12, 6.5);
             break;
         case Warning:
             path.moveTo(12, 3.5); path.lineTo(21.5, 20); path.lineTo(2.5, 20); path.closeSubpath();

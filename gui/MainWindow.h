@@ -5,6 +5,7 @@
 // searching is done by the engine; this class wires it to the user interface.
 #pragma once
 #include <QMainWindow>
+#include <QPointer>
 #include <QString>
 #include <vector>
 #include "Search.h"
@@ -20,6 +21,10 @@ class QPushButton;
 class FileExplorer;
 class WelcomePage;
 class QStackedWidget;
+class QSplitter;
+class TerminalPanel;
+class SettingsDialog;
+class ShortcutsDialog;
 
 class MainWindow : public QMainWindow {
     Q_OBJECT
@@ -52,6 +57,15 @@ public:
     QStringList recentFiles() const;
     QStringList recentFolders() const;
 
+    // terminal panel, settings window, shortcuts window
+    TerminalPanel* terminal() const { return terminal_; }
+    void showTerminal(bool show);
+    bool terminalVisible() const;
+    SettingsDialog* showSettings(const QString& section = QString());
+    ShortcutsDialog* showShortcuts();
+    bool runCurrent();                                     // F5: save, build if needed, run in the terminal
+    void stopRun();                                        // Shift+F5
+
 protected:
     void closeEvent(QCloseEvent*) override;
     void dragEnterEvent(QDragEnterEvent*) override;
@@ -74,6 +88,7 @@ private slots:
     void replaceOne();
     void replaceEverything();
     void closeFind();
+    void applyPrefs();                                     // the Settings window changed something
 
 private:
     QTabWidget* tabs_ = nullptr;
@@ -82,6 +97,13 @@ private:
     WelcomePage* welcome_ = nullptr;
     QStackedWidget* centralStack_ = nullptr;               // welcome page or the editor (tabs + find bar)
     QWidget* editorArea_ = nullptr;
+    QSplitter* split_ = nullptr;                           // editor above, terminal below
+    TerminalPanel* terminal_ = nullptr;
+    QAction* terminalAct_ = nullptr;
+    QAction* runAct_ = nullptr;
+    QPointer<SettingsDialog> settings_;
+    QPointer<ShortcutsDialog> shortcuts_;
+    int terminalHeight_ = 240;
     QLabel* encLabel_ = nullptr;
     QAction* shortcutsAct_ = nullptr;
     QWidget* findBar_ = nullptr;

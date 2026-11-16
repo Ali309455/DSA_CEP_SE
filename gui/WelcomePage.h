@@ -6,6 +6,8 @@
 #pragma once
 #include <QStringList>
 #include <QWidget>
+#include <utility>
+#include <vector>
 
 class QLabel;
 class QPushButton;
@@ -25,19 +27,30 @@ public:
     // "file:<path>" or "folder:<path>". The links call this; the tests do too.
     void activate(const QString& link);
 
+    // The accent colour changed (Settings > Appearance): recolour icons and links.
+    void refreshAccent();
+
 signals:
     void newFileRequested();
     void openFileRequested();
     void openFolderRequested();
     void quickOpenRequested();
     void shortcutsRequested();
+    void settingsRequested();
+    void terminalRequested();
     void recentFileRequested(const QString& path);
     void recentFolderRequested(const QString& path);
 
 private:
     QPushButton* quick_ = nullptr;
+    QLabel* keysLink_ = nullptr;
+    QLabel* settingsLink_ = nullptr;
+    QLabel* terminalLink_ = nullptr;
+    void refreshLinks();
     QVBoxLayout* recentBox_ = nullptr;
     QStringList shown_;
+    QStringList recentFiles_, recentFolders_;
+    std::vector<std::pair<QLabel*, int>> cardIcons_;     // icon label and glyph, to recolour
     QLabel* link(const QString& html, QWidget* parent);
     QPushButton* card(const QString& link, int glyph, const QString& title, const QString& hint, QWidget* parent);
 };

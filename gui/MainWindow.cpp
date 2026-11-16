@@ -25,6 +25,7 @@
 #include <QPushButton>
 #include <QSettings>
 #include <QShortcut>
+#include <QSplitter>
 #include <QStackedWidget>
 #include <QStatusBar>
 #include <QTabBar>
@@ -42,6 +43,12 @@
 #include "Icons.h"
 #include "Theme.h"
 #include "WinTheme.h"
+#include "Settings.h"
+#include "SettingsDialog.h"
+#include "ShortcutsDialog.h"
+#include "TerminalPanel.h"
+#include "Runner.h"
+#include <QStandardPaths>
 #include "FileIO.h"
 #include "Workspace.h"
 
@@ -50,6 +57,7 @@ static const char* kApp = "DevPad";
 // ---------------------------------------------------------------- construction
 
 MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
+    Theme::loadAccent();                                  // widgets built below already use the chosen accent
     setWindowTitle(kApp);
     setWindowIcon(Icons::app());
     setAcceptDrops(true);
@@ -100,7 +108,9 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     connect(welcome_, &WelcomePage::openFileRequested, this, &MainWindow::openDialog);
     connect(welcome_, &WelcomePage::openFolderRequested, this, &MainWindow::openFolderDialog);
     connect(welcome_, &WelcomePage::quickOpenRequested, this, &MainWindow::quickOpen);
-    connect(welcome_, &WelcomePage::shortcutsRequested, this, [this]() { if (shortcutsAct_) shortcutsAct_->trigger(); });
+    connect(welcome_, &WelcomePage::shortcutsRequested, this, [this]() { showShortcuts(); });
+    connect(welcome_, &WelcomePage::settingsRequested, this, [this]() { showSettings(); });
+    connect(welcome_, &WelcomePage::terminalRequested, this, [this]() { showTerminal(true); });
     connect(welcome_, &WelcomePage::recentFileRequested, this, [this](const QString& p) { openPath(p); });
     connect(welcome_, &WelcomePage::recentFolderRequested, this, [this](const QString& p) {
         if (!QFileInfo(p).isDir()) { updateCentral(); return; }
@@ -111,7 +121,20 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     centralStack_ = new QStackedWidget(this);
     centralStack_->addWidget(welcome_);
     centralStack_->addWidget(editorArea_);
-    setCentralWidget(centralStack_);
+
+    // terminal under the editor, with a splitter to drag it taller or shorter
+    terminal_ = new TerminalPanel(this);
+    connect(terminal_, &TerminalPanel::hideRequested, this, [this]() { showTerminal(false); });
+    split_ = new QSplitter(Qt::Vertical, this);
+    split_->setHandleWidth(5);
+    split_->setChildrenCollapsible(false);
+    split_->addWidget(centralStack_);
+    split_->addWidget(terminal_);
+    split_->setStretchFactor(0, 1);
+    split_->setStretchFactor(1, 0);
+    terminal_->hide();
+    connect(split_, &QSplitter::splitterMoved, this, [this]() { if (terminal_->isVisible()) terminalHeight_ = terminal_->height(); });
+    setCentralWidget(split_);
 
     // sidebar: file manager
     explorer_ = new FileExplorer(this);
@@ -161,6 +184,85 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     applyDarkTheme();
     enableDarkTitleBar(this);
     updateCentral();
+    connect(&AppSettings::instance(), &AppSettings::changed, this, &MainWindow::applyPrefs);
+    statusBar()->setVisible(AppSettings::instance().values().statusBar);
+}
+
+// ---------------------------------------------------------------- settings, terminal, shortcuts windows
+
+void MainWindow::applyPrefs() {
+    const AppSettings::Values& v = AppSettings::instance().values();
+    statusBar()->setVisible(v.statusBar);
+    const QColor accent(AppSettings::accentRgb(v.accent));
+    if (accent != Theme::Accent) {
+        Theme::setAccent(accent);
+        welcome_->refreshAccent();
+        update();
+    }
+}
+
+SettingsDialog* MainWindow::showSettings(const QString& section) {
+    if (!settings_) settings_ = new SettingsDialog(this);
+    settings_->show();
+    settings_->raise();
+    settings_->activateWindow();
+    if (!section.isEmpty()) settings_->showSection(section);
+    return settings_;
+}
+
+ShortcutsDialog* MainWindow::showShortcuts() {
+    if (!shortcuts_) shortcuts_ = new ShortcutsDialog(this);
+    shortcuts_->show();
+    shortcuts_->raise();
+    shortcuts_->activateWindow();
+    return shortcuts_;
+}
+
+// F5. The file is saved first (the program must be what is on screen), then built and run in the
+// terminal, in the file's own folder so relative paths in the program work.
+bool MainWindow::runCurrent() {
+    CodeView* v = currentView();
+    if (!v) { statusBar()->showMessage("Open a file to run it", 4000); return false; }
+    if (!saveView(v, false)) return false;
+    const QString path = QString::fromStdString(v->editor().doc().path());
+    const QString outDir = QDir(QStandardPaths::writableLocation(QStandardPaths::TempLocation)).filePath("devpad-run");
+    QDir().mkpath(outDir);
+    const Runner::Shell sh = Runner::shellKind(AppSettings::instance().values().terminalShell);
+    const Runner::Plan plan = Runner::planFor(path, sh, outDir);
+    showTerminal(true);
+    if (plan.steps.isEmpty()) {
+        const QString msg = "DevPad cannot run ." + plan.extension + " files (F5 runs: " + Runner::supportedExtensions().join(", ") + ")";
+        statusBar()->showMessage(msg, 6000);
+        terminal_->runSequence({});                       // nothing; the message above explains
+        return false;
+    }
+    terminal_->setWorkingDirectory(QFileInfo(path).absolutePath());
+    statusBar()->showMessage("Running " + QFileInfo(path).fileName() + " - " + plan.description, 4000);
+    terminal_->runSequence(plan.steps);
+    return true;
+}
+
+void MainWindow::stopRun() { if (terminal_) terminal_->stop(); }
+
+bool MainWindow::terminalVisible() const { return terminal_ && !terminal_->isHidden(); }
+
+void MainWindow::showTerminal(bool show) {
+    if (show == terminalVisible()) { if (show) terminal_->focusInput(); return; }
+    if (show) {
+        terminal_->show();
+        const int total = split_->height();
+        const int h = std::max(120, std::min(terminalHeight_, total / 2));
+        split_->setSizes({std::max(1, total - h), h});
+        terminal_->focusInput();
+    } else {
+        terminalHeight_ = std::max(120, terminal_->height());
+        terminal_->hide();
+        if (CodeView* v = currentView()) v->setFocus();
+    }
+    if (terminalAct_) {
+        QSignalBlocker b(terminalAct_);
+        terminalAct_->setChecked(show);
+    }
 }
 
 // Slim bar on the far left with the main places, like other modern editors.
@@ -187,12 +289,22 @@ void MainWindow::buildActivityBar() {
     QAction* go = bar->addAction(Icons::get(Icons::Palette, rest, lit), "Go to File");
     go->setToolTip("Go to File (Ctrl+P)");
     connect(go, &QAction::triggered, this, &MainWindow::quickOpen);
+    QAction* playAct = bar->addAction(Icons::get(Icons::Play, rest, lit), "Run File");
+    playAct->setToolTip("Run File (F5)");
+    connect(playAct, &QAction::triggered, this, [this]() { runCurrent(); });
+    terminalAct_ = bar->addAction(Icons::get(Icons::Terminal, rest, lit), "Terminal");
+    terminalAct_->setCheckable(true);
+    terminalAct_->setToolTip("Terminal (Ctrl+`)");
+    connect(terminalAct_, &QAction::triggered, this, [this](bool on) { showTerminal(on); });
     QWidget* spacer = new QWidget(bar);
     spacer->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Expanding);
     bar->addWidget(spacer);
     QAction* keys = bar->addAction(Icons::get(Icons::Keyboard, rest, lit), "Keyboard Shortcuts");
     keys->setToolTip("Keyboard Shortcuts (F1)");
-    connect(keys, &QAction::triggered, this, [this]() { if (shortcutsAct_) shortcutsAct_->trigger(); });
+    connect(keys, &QAction::triggered, this, [this]() { showShortcuts(); });
+    QAction* gear = bar->addAction(Icons::get(Icons::Gear, rest, lit), "Settings");
+    gear->setToolTip("Settings (Ctrl+,)");
+    connect(gear, &QAction::triggered, this, [this]() { showSettings(); });
 }
 
 // ---------------------------------------------------------------- welcome page, recent lists
@@ -267,6 +379,8 @@ void MainWindow::buildActions() {
     add(file, "Rename File…", seq("F2"), [this]() { renameDialog(); });
     add(file, "Close Tab", seq("Ctrl+W"), [this]() { closeTab(tabs_->currentIndex()); });
     file->addSeparator();
+    add(file, "Settings…", seq("Ctrl+,"), [this]() { showSettings(); });
+    file->addSeparator();
     add(file, "Quit", seq("Ctrl+Q"), [this]() { close(); });
 
     QMenu* edit = menuBar()->addMenu("&Edit");
@@ -301,6 +415,10 @@ void MainWindow::buildActions() {
     add(search, "Go to File…", {QKeySequence(QStringLiteral("Ctrl+P"))}, [this]() { quickOpen(); });
     add(search, "Go to Line…", seq("Ctrl+G"), [this]() { goToLineDialog(); });
 
+    QMenu* run = menuBar()->addMenu("&Run");
+    runAct_ = add(run, "Run File", {QKeySequence(QStringLiteral("F5"))}, [this]() { runCurrent(); });
+    add(run, "Stop", {QKeySequence(QStringLiteral("Shift+F5"))}, [this]() { stopRun(); });
+
     QMenu* view = menuBar()->addMenu("&View");
     add(view, "Next Tab", {QKeySequence(QStringLiteral("Ctrl+Tab")), QKeySequence(QStringLiteral("Ctrl+PgDown"))}, [this]() { nextTab(+1); });
     add(view, "Previous Tab", {QKeySequence(QStringLiteral("Ctrl+Shift+Tab")), QKeySequence(QStringLiteral("Ctrl+PgUp"))}, [this]() { nextTab(-1); });
@@ -314,55 +432,24 @@ void MainWindow::buildActions() {
         addAction(a);
     }
     view->addSeparator();
+    add(view, "Toggle Terminal", seq("Ctrl+`"), [this]() { showTerminal(!terminalVisible()); });
     QAction* side = dock_->toggleViewAction();
     side->setText("Toggle Sidebar");
     side->setShortcut(QKeySequence(QStringLiteral("Ctrl+B")));
     view->addAction(side);
     addAction(side);
-    auto zoomBy = [this](int d) {
-        for (int i = 0; i < tabs_->count(); ++i) viewAt(i)->setZoom(d == 0 ? 11 : viewAt(i)->zoom() + d);
+    auto zoomBy = [this](int d) {                          // zoom is the font-size setting, shared by every tab
+        const int target = d == 0 ? AppSettings::Values().fontSize : AppSettings::instance().values().fontSize + d;
+        AppSettings::Values v = AppSettings::instance().values();
+        v.fontSize = target;
+        AppSettings::instance().apply(v);
     };
     add(view, "Zoom In", {QKeySequence(QStringLiteral("Ctrl+=")), QKeySequence(QStringLiteral("Ctrl++"))}, [zoomBy]() { zoomBy(+1); });
     add(view, "Zoom Out", seq("Ctrl+-"), [zoomBy]() { zoomBy(-1); });
     add(view, "Reset Zoom", seq("Ctrl+0"), [zoomBy]() { zoomBy(0); });
 
     QMenu* help = menuBar()->addMenu("&Help");
-    shortcutsAct_ = add(help, "Keyboard Shortcuts", seq("F1"), [this]() {
-        QMessageBox::information(this, "Keyboard shortcuts",
-            "Tabs\n"
-            "  Ctrl+Tab / Ctrl+Shift+Tab   next / previous tab\n"
-            "  Ctrl+PgDn / Ctrl+PgUp       next / previous tab\n"
-            "  Alt+1 … Alt+9               go to tab (Alt+9 = last)\n"
-            "  Ctrl+N / Ctrl+W             new / close tab\n\n"
-            "Files\n"
-            "  Ctrl+P                      go to file (fuzzy search)\n"
-            "  F2                          rename file\n"
-            "  Ctrl+Shift+O                open folder\n"
-            "  Ctrl+B                      toggle sidebar\n\n"
-            "Explorer (sidebar, when it has focus)\n"
-            "  click / Enter               open file, open or close folder\n"
-            "  F2                          rename        Del  delete (Recycle Bin)\n"
-            "  Shift+Del                   delete permanently\n"
-            "  Ctrl+X / Ctrl+C / Ctrl+V    cut / copy / paste files\n"
-            "  drag onto a folder          move  (hold Ctrl to copy)\n"
-            "  right-click                 new file / folder, duplicate, copy path, reveal\n\n"
-            "Lines\n"
-            "  Alt+Up / Alt+Down           move line(s)\n"
-            "  Shift+Alt+Up / Down         copy line(s) up / down  (Ctrl+D also copies down)\n"
-            "  Ctrl+Shift+K                delete line\n"
-            "  Ctrl+Enter / Ctrl+Shift+Enter   new line below / above\n"
-            "  Ctrl+] / Ctrl+[             indent / outdent\n"
-            "  Ctrl+/                      toggle comment\n"
-            "  Ctrl+L                      select line\n\n"
-            "Brackets and quotes\n"
-            "  type ( [ { \" ' ` with text selected   wrap the selection (the same key again unwraps)\n"
-            "  type ( [ { \" ' `                      auto-closing pair\n\n"
-            "Search\n"
-            "  Ctrl+F / Ctrl+H             find / replace\n"
-            "  F3 / Shift+F3               next / previous match\n"
-            "  Ctrl+G                      go to line\n"
-            "  Ctrl+Space                  autocomplete");
-    });
+    shortcutsAct_ = add(help, "Keyboard Shortcuts", seq("F1"), [this]() { showShortcuts(); });
 }
 
 // ---------------------------------------------------------------- find bar
@@ -754,6 +841,7 @@ void MainWindow::setWorkspaceRoot(const QString& dir) {
     root_ = fi.canonicalFilePath();
     rootChosen_ = true;
     explorer_->setRoot(root_);
+    terminal_->setWorkingDirectory(root_);
     welcome_->setFolderOpen(true);
     if (CodeView* v = currentView()) explorer_->reveal(QString::fromStdString(v->editor().doc().path()));
 }
@@ -951,20 +1039,22 @@ void MainWindow::closeEvent(QCloseEvent* e) {
     s.setValue("root", root_);
     s.setValue("sidebar", dock_->isVisible());
     s.setValue("geometry", saveGeometry());
-    s.setValue("zoom", currentView() ? currentView()->zoom() : 11);
+    s.setValue("terminal", terminalVisible());
+    s.setValue("terminalHeight", terminalVisible() ? terminal_->height() : terminalHeight_);
     e->accept();
 }
 
 void MainWindow::restoreSession() {
     QSettings s;
     restoreGeometry(s.value("geometry").toByteArray());
+    terminalHeight_ = std::max(120, s.value("terminalHeight", 240).toInt());
+    if (!AppSettings::instance().values().restoreSession) return;      // Settings > General: start empty
     const QString root = s.value("root").toString();
     if (!root.isEmpty() && QFileInfo(root).isDir()) setWorkspaceRoot(root);
     dock_->setVisible(s.value("sidebar", true).toBool());
-    const int zoom = s.value("zoom", 11).toInt();
     for (const QString& f : s.value("files").toStringList())
         if (QFileInfo(f).isFile()) openPath(f);
     const QString cur = s.value("current").toString();
     if (!cur.isEmpty()) { const int i = indexOfPath(cur); if (i >= 0) tabs_->setCurrentIndex(i); }
-    for (int i = 0; i < tabs_->count(); ++i) viewAt(i)->setZoom(zoom);
+    if (s.value("terminal", false).toBool()) showTerminal(true);
 }

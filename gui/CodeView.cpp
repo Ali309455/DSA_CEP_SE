@@ -42,6 +42,9 @@ CodeView::CodeView(QWidget* parent) : QAbstractScrollArea(parent) {
     setAttribute(Qt::WA_InputMethodEnabled, true);
     viewport()->setCursor(Qt::IBeamCursor);
     viewport()->setAutoFillBackground(false);
+    zoom_ = prefs().fontSize;
+    fontFamily_ = prefs().fontFamily;
+    tabWidth_ = prefs().tabWidth;
     applyFont();
     verticalScrollBar()->setSingleStep(1);
 
@@ -50,7 +53,8 @@ CodeView::CodeView(QWidget* parent) : QAbstractScrollArea(parent) {
         cursorOn_ = !cursorOn_;
         viewport()->update();
     });
-    blink_.start();
+    if (prefs().cursorBlink) blink_.start();
+    connect(&AppSettings::instance(), &AppSettings::changed, this, &CodeView::applySettings);
 
     bracketTimer_.setSingleShot(true);
     connect(&bracketTimer_, &QTimer::timeout, this, [this]() { recomputeBrackets(); });
@@ -78,7 +82,7 @@ CodeView::CodeView(QWidget* parent) : QAbstractScrollArea(parent) {
 }
 
 void CodeView::applyFont() {
-    QFont f = Theme::codeFont(zoom_);
+    QFont f = Theme::codeFont(zoom_, fontFamily_);
     setFont(f);
     viewport()->setFont(f);
     QFontMetrics fm(f);
@@ -92,13 +96,34 @@ void CodeView::applyFont() {
 void CodeView::setZoom(int points) {
     zoom_ = std::max(7, std::min(36, points));
     applyFont();
+    // zoom is the font-size setting: every tab follows, and it is remembered
+    AppSettings::Values v = prefs();
+    if (v.fontSize != zoom_) {
+        v.fontSize = zoom_;
+        AppSettings::instance().apply(v);
+    }
     emit stateChanged();
+}
+
+// Something in the Settings window changed: pick up what concerns the editor.
+void CodeView::applySettings() {
+    const AppSettings::Values& s = prefs();
+    const bool fontChanged = zoom_ != s.fontSize || fontFamily_ != s.fontFamily;
+    zoom_ = s.fontSize;
+    fontFamily_ = s.fontFamily;
+    if (tabWidth_ != s.tabWidth) { tabWidth_ = s.tabWidth; maxCols_ = 0; }
+    if (s.cursorBlink) { if (!blink_.isActive()) blink_.start(); }
+    else { blink_.stop(); cursorOn_ = true; }
+    if (!s.autoComplete) { autoTimer_.stop(); hidePopup(); }
+    if (fontChanged) applyFont();                                 // also redoes the gutter and scroll bars
+    else { updateGutter(); updateScrollBars(); }
+    viewport()->update();
 }
 
 void CodeView::updateGutter() {
     int digits = 3;
     for (size_t n = ed_.doc().lineCount(); n >= 1000; n /= 10) ++digits;
-    gutterW_ = digits * charW_ + 22;
+    gutterW_ = prefs().lineNumbers ? digits * charW_ + 22 : 16;
 }
 
 int CodeView::visibleLines() const { return std::max(1, viewport()->height() / lineH_); }
@@ -493,7 +518,7 @@ void CodeView::paintEvent(QPaintEvent*) {
 
     Pos b1, b2;
     bool haveBracket = false;
-    if (!dirtyBrackets_ && hasFocus()) haveBracket = matchNearCursor(doc, report_, cur_, b1, b2);
+    if (!dirtyBrackets_ && hasFocus() && prefs().matchBrackets) haveBracket = matchNearCursor(doc, report_, cur_, b1, b2);
 
     const Pos ss = selStart(), se = selEnd();
     const bool sel = hasSelection();
@@ -514,7 +539,7 @@ void CodeView::paintEvent(QPaintEvent*) {
         const QString s = expandTabs(raw);
         if (s.size() > maxCols_) { maxCols_ = s.size(); updateScrollBars(); }
 
-        if (l == cur_.line && !sel) p.fillRect(gutterW_, y, vw - gutterW_, lineH_, kCurLine);
+        if (l == cur_.line && !sel && prefs().highlightLine) p.fillRect(gutterW_, y, vw - gutterW_, lineH_, kCurLine);
 
         for (size_t k = hi; k < highlights_.size() && highlights_[k].start.line <= l; ++k) {
             const Match& m = highlights_[k];
@@ -533,7 +558,7 @@ void CodeView::paintEvent(QPaintEvent*) {
         int lead = 0;                                // indentation guides
         while (lead < s.size() && s[lead] == QLatin1Char(' ')) ++lead;
         p.setPen(kGuide);
-        for (int c = tabWidth_; c < lead; c += tabWidth_) {
+        for (int c = tabWidth_; prefs().indentGuides && c < lead; c += tabWidth_) {
             const int gx = left + c * charW_;
             p.drawLine(gx, y, gx, y + lineH_);
         }
@@ -565,14 +590,20 @@ void CodeView::paintEvent(QPaintEvent*) {
             }
         }
 
-        if (hasFocus() && cursorOn_ && l == cur_.line)
-            p.fillRect(left + displayCol(raw, cur_.col) * charW_, y, 2, lineH_, kCursorCol);
+        if (hasFocus() && cursorOn_ && l == cur_.line) {
+            const int cx = left + displayCol(raw, cur_.col) * charW_;
+            switch (prefs().cursorStyle) {
+                case 1: { QColor c = kCursorCol; c.setAlpha(150); p.fillRect(cx, y, charW_, lineH_, c); break; }   // block: the character shows through
+                case 2: p.fillRect(cx, y + lineH_ - 3, charW_, 2, kCursorCol); break;                                // underline
+                default: p.fillRect(cx, y, 2, lineH_, kCursorCol); break;                                            // line
+            }
+        }
     }
 
     // line-number gutter, drawn last so horizontal scrolling slides under it
     p.fillRect(0, 0, gutterW_, vh, kBg);
     // (no divider line: the gutter and the text share one surface, like modern editors)
-    for (size_t l = first; l < last; ++l) {
+    for (size_t l = first; prefs().lineNumbers && l < last; ++l) {
         const int y = static_cast<int>(l - first) * lineH_;
         p.setPen(l == cur_.line ? kGutterCur : kGutterNum);
         p.drawText(QRect(0, y, gutterW_ - 10, lineH_), Qt::AlignRight | Qt::AlignVCenter, QString::number(l + 1));
@@ -607,7 +638,7 @@ void CodeView::typeChar(char c) {
     if (hasSelection()) {
         // wrap the selection: "text" (text) {text} ... ; the same bracket / quote again removes the pair
         bool changed = false;
-        if (opener || isWrappedBy(doc, anchor_, cur_, c)) {
+        if (prefs().wrapSelection && (opener || isWrappedBy(doc, anchor_, cur_, c))) {
             SelRange r = toggleSurround(ed_, anchor_, cur_, c, &changed);
             anchor_ = r.start;
             cur_ = r.end;
@@ -620,14 +651,14 @@ void CodeView::typeChar(char c) {
 
     const std::string line = lineText(cur_.line);
     const char next = cur_.col < line.size() ? line[cur_.col] : 0;
-    if ((c == ')' || c == ']' || c == '}' || c == '"' || c == '\'' || c == '`') && next == c) {
+    if (prefs().autoPairs && (c == ')' || c == ']' || c == '}' || c == '"' || c == '\'' || c == '`') && next == c) {
         cur_.col += 1;                                  // type over the closing character
         anchor_ = cur_;
         ed_.breakTyping();
         edited(cur_.line);
         return;
     }
-    if (opener && shouldAutoPair(doc, cur_, c)) {
+    if (opener && prefs().autoPairs && shouldAutoPair(doc, cur_, c)) {
         ed_.insertText(cur_, std::string{c, closer});
         cur_.col += 1;
         anchor_ = cur_;
@@ -654,7 +685,7 @@ void CodeView::backspace(bool word) {
     size_t from;
     if (word) {
         from = wordLeft(line, p.col);
-    } else if (isEmptyPairAround(ed_.doc(), p)) {
+    } else if (prefs().autoPairs && isEmptyPairAround(ed_.doc(), p)) {
         ed_.deleteRange(Pos{p.line, p.col - 1}, Pos{p.line, p.col + 1});
         cur_.col -= 1;
         anchor_ = cur_;
@@ -999,7 +1030,8 @@ void CodeView::keyPressEvent(QKeyEvent* e) {
     else if (hasSelection()) insertTypedText(u);
     else { cur_ = ed_.typeText(cur_, u); anchor_ = cur_; edited(cur_.line); }
 
-    if (u.size() == 1 && isWordChar(u[0])) autoTimer_.start();
+    if (!prefs().autoComplete) hidePopup();
+    else if (u.size() == 1 && isWordChar(u[0])) autoTimer_.start();
     else if (u.size() > 1) autoTimer_.start();
     else hidePopup();
 }

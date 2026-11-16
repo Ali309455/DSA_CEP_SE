@@ -14,7 +14,7 @@ inline const QColor Chrome(0x18, 0x18, 0x18);        // activity bar, sidebar, t
 inline const QColor Editor(0x1f, 0x1f, 0x1f);        // editor and welcome page
 inline const QColor Surface(0x2b, 0x2b, 0x2b);       // inputs, popups, cards
 inline const QColor Border(0x2b, 0x2b, 0x2b);
-inline const QColor Accent(0x4f, 0x8c, 0xff);
+inline QColor Accent(0x4f, 0x8c, 0xff);              // changed by setAccent() (Settings > Appearance)
 inline const QColor Text(0xcc, 0xcc, 0xcc);
 inline const QColor Muted(0x9d, 0x9d, 0x9d);
 inline const QColor Dim(0x6e, 0x6e, 0x6e);
@@ -25,7 +25,7 @@ inline const QColor Selection(0x26, 0x4f, 0x78);
 inline const QColor FindMatch(0x62, 0x4a, 0x1c);
 inline const QColor GutterNumber(0x6e, 0x76, 0x81);
 inline const QColor GutterCurrent(0xcc, 0xcc, 0xcc);
-inline const QColor Caret(0x6b, 0x9f, 0xff);
+inline QColor Caret(0x6b, 0x9f, 0xff);
 inline const QColor IndentGuide(0x33, 0x33, 0x33);
 
 // syntax colours, in the order of the tokenizer's classes:
@@ -37,7 +37,16 @@ inline const QColor Syntax[] = {
 // Fonts: the system UI font (Segoe UI on Windows) and a good monospace font that exists here
 // (Cascadia Code / Mono on Windows 11, then JetBrains Mono, Fira Code, Consolas, ...).
 QFont uiFont();
-QFont codeFont(int pointSize);
+QFont codeFont(int pointSize, const QString& family = QString());   // family empty: the automatic choice
+
+// Colours derived from the accent (hover, soft selection background, deep menu selection).
+QColor accentHover();
+QColor accentSoft();
+QColor accentDeep();
+// Choose the accent colour and, if the application style sheet is already in place, rebuild it.
+void setAccent(const QColor& c);
+// Read the accent from the user's settings (call before building widgets).
+void loadAccent();
 
 // Palette, style sheet and font for the whole application.
 void apply();

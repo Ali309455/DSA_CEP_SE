@@ -19,7 +19,8 @@ enum Glyph {
     NewFile, NewFolder, Refresh, Collapse,              // explorer toolbar
     Close, ChevronRight, ChevronDown, ArrowUp, ArrowDown,
     CaseSensitive, WholeWord,
-    Check, Warning, Folder, FolderOpen, File, OpenFile
+    Check, Warning, Folder, FolderOpen, File, OpenFile,
+    Terminal, Gear, Trash, Stop, Editor, Brush, Plus, Play      // terminal panel, settings window
 };
 
 // A line icon. 'normal' is the colour at rest; hovered and checked states use 'active'.

@@ -63,6 +63,11 @@ gui/CodeView.h/cpp    the text area: custom-painted Qt widget on top of Editor (
 gui/MainWindow.h/cpp  tabs, menus, shortcuts, find bar, Quick Open, rename
 gui/FileExplorer.h/cpp  the file manager in the left sidebar
 gui/WelcomePage.h/cpp   shown when no file is open: start actions, recent files / folders, shortcuts
+gui/Settings.h/cpp      the user's preferences (QSettings), one signal when anything changes
+gui/SettingsDialog.*    Settings window (Ctrl+,), gui/Controls.* its switches, steppers, swatches
+gui/ShortcutsDialog.*   Keyboard Shortcuts window (F1): searchable key-cap cards
+gui/TerminalPanel.*     built-in terminal under the editor (Ctrl+`)
+gui/Runner.h/cpp        what F5 runs for each file type
 gui/Theme.h/cpp         the dark theme: palette, style sheet, UI and code fonts (one place for every colour)
 gui/Icons.h/cpp         all icons, drawn in code: line icons, file-type badges, folders, the app icon
 gui/WinTheme.h/cpp      dark title bars on Windows 10 / 11 (dwmapi)
@@ -242,6 +247,18 @@ key presses into engine calls.
 | Search | `Ctrl+F` find, `Ctrl+H` replace, `F3` / `Shift+F3` next / previous, `Ctrl+G` go to line, `Ctrl+Space` autocomplete |
 | Edit | `Ctrl+Z`, `Ctrl+Y` / `Ctrl+Shift+Z`, cut / copy / paste (copy or cut with nothing selected takes the whole line), `Ctrl+Wheel` / `Ctrl+=` / `Ctrl+-` zoom |
 | Explorer (sidebar focused) | click / `Enter` open file or open/close folder, `F2` rename in place, `Del` delete to the Recycle Bin, `Shift+Del` delete permanently, `Ctrl+X` / `Ctrl+C` / `Ctrl+V` cut / copy / paste files, drag onto a folder to move (`Ctrl`+drag copies) |
+
+### Settings, terminal and Run (GUI refining)
+
+- **Settings** (`Ctrl+,`, the gear in the activity bar, File > Settings): font size and family, tab width, auto-close
+  brackets, wrap selection, suggest-while-typing, cursor style and blinking, accent colour, line numbers, indent
+  guides, current-line and bracket highlight, status bar, terminal font / shell / scrollback, reopen last session.
+  Everything applies immediately and is remembered; the search box filters the rows.
+- **Terminal** (`Ctrl+\``): runs commands in the open folder (cmd on Windows, `$SHELL` elsewhere, or the shell chosen
+  in Settings), shows ANSI colours, remembers `cd`, `Up`/`Down` history, `Ctrl+C` stops, `Ctrl+L` clears.
+- **Run** (`F5`): saves the file, builds it if needed and runs it in the terminal, in the file's folder. `Shift+F5`
+  stops it. Needs the tool on PATH: `g++`/`gcc` (C/C++), `python`, `node`, `java`, `go`, `rustc`, `ruby`, `php`, `lua`,
+  `bash`; `.bat`/`.cmd`/`.ps1` run directly. A compile error stops the run, so an old build never runs by mistake.
 
 ### Look
 

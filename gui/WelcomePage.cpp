@@ -7,10 +7,13 @@
 #include <QLabel>
 #include <QPushButton>
 #include "Icons.h"
+#include "Theme.h"
 #include <QScrollArea>
 #include <QVBoxLayout>
 
-static const char* kLink = "color:#6ea2ff;text-decoration:none;";
+// links and card icons follow the accent colour chosen in Settings
+static QColor linkColor() { return Theme::Accent.lighter(125); }
+static QString linkStyle() { return QString("color:%1;text-decoration:none;").arg(linkColor().name()); }
 
 static QString esc(const QString& s) { return s.toHtmlEscaped(); }
 
@@ -49,7 +52,8 @@ QPushButton* WelcomePage::card(const QString& target, int glyph, const QString& 
     h->setContentsMargins(14, 10, 14, 10);
     h->setSpacing(12);
     QLabel* icon = new QLabel(b);
-    icon->setPixmap(Icons::get(Icons::Glyph(glyph), QColor(0x6e, 0xa2, 0xff), QColor(0x6e, 0xa2, 0xff)).pixmap(QSize(24, 24)));
+    icon->setPixmap(Icons::get(Icons::Glyph(glyph), linkColor(), linkColor()).pixmap(QSize(24, 24)));
+    cardIcons_.emplace_back(icon, glyph);
     QVBoxLayout* t = new QVBoxLayout();
     t->setSpacing(1);
     QLabel* l1 = new QLabel(title, b);
@@ -169,7 +173,13 @@ WelcomePage::WelcomePage(QWidget* parent) : QWidget(parent) {
     kg->setColumnStretch(1, 1);
     right->addLayout(kg);
     right->addSpacing(6);
-    right->addWidget(link(QString("<a href=\"keys\" style=\"%1\">All keyboard shortcuts…</a>&nbsp;&nbsp;<span style=\"color:#7a7a7a\">F1</span>").arg(kLink), column));
+    keysLink_ = link(QString(), column);
+    settingsLink_ = link(QString(), column);
+    terminalLink_ = link(QString(), column);
+    right->addWidget(keysLink_);
+    right->addWidget(settingsLink_);
+    right->addWidget(terminalLink_);
+    refreshLinks();
     right->addStretch(1);
 
     grid->addLayout(left, 0, 0, Qt::AlignTop);
@@ -188,12 +198,29 @@ WelcomePage::WelcomePage(QWidget* parent) : QWidget(parent) {
 
 void WelcomePage::setFolderOpen(bool open) { quick_->setVisible(open); }
 
+void WelcomePage::refreshLinks() {
+    auto text = [](const char* target, const char* label, const char* key) {
+        return QString("<a href=\"%1\" style=\"%2\">%3</a>&nbsp;&nbsp;<span style=\"color:#7a7a7a\">%4</span>").arg(target, linkStyle(), label, key);
+    };
+    keysLink_->setText(text("keys", "All keyboard shortcuts…", "F1"));
+    settingsLink_->setText(text("settings", "Settings…", "Ctrl+,"));
+    terminalLink_->setText(text("terminal", "Open terminal", "Ctrl+`"));
+}
+
+void WelcomePage::refreshAccent() {
+    for (const auto& c : cardIcons_) c.first->setPixmap(Icons::get(Icons::Glyph(c.second), linkColor(), linkColor()).pixmap(QSize(24, 24)));
+    refreshLinks();
+    setRecent(recentFiles_, recentFolders_);
+}
+
 void WelcomePage::setRecent(const QStringList& files, const QStringList& folders) {
     while (QLayoutItem* it = recentBox_->takeAt(0)) {
         delete it->widget();
         delete it;
     }
     shown_.clear();
+    recentFiles_ = files;
+    recentFolders_ = folders;
     auto add = [&](const QString& kind, const QString& path) {
         const QFileInfo fi(path);
         const QString name = fi.fileName().isEmpty() ? path : fi.fileName();
@@ -205,7 +232,7 @@ void WelcomePage::setRecent(const QStringList& files, const QStringList& folders
         QLabel* icon = new QLabel(rowW);
         icon->setPixmap((kind == "folder" ? Icons::folder(false) : Icons::forFile(name)).pixmap(QSize(16, 16)));
         QLabel* l = link(QString("<a href=\"%1:%2\" style=\"%3\">%4</a>&nbsp;&nbsp;<span style=\"color:#6e6e6e\">%5</span>")
-                             .arg(kind, esc(path), kLink, esc(name), esc(where)),
+                             .arg(kind, esc(path), linkStyle(), esc(name), esc(where)),
                          rowW);
         l->setToolTip(QDir::toNativeSeparators(path));
         row->addWidget(icon);
@@ -233,6 +260,8 @@ void WelcomePage::activate(const QString& link) {
     else if (link == "folder") emit openFolderRequested();
     else if (link == "quick") emit quickOpenRequested();
     else if (link == "keys") emit shortcutsRequested();
+    else if (link == "settings") emit settingsRequested();
+    else if (link == "terminal") emit terminalRequested();
     else if (link.startsWith("file:")) emit recentFileRequested(link.mid(5));
     else if (link.startsWith("folder:")) emit recentFolderRequested(link.mid(7));
 }

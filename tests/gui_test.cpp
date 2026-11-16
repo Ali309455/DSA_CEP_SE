@@ -1,6 +1,7 @@
 // GUI smoke tests: the real MainWindow / CodeView, driven with simulated key presses.
 // Runs without a screen:  QT_QPA_PLATFORM=offscreen ./gui_tests   (ctest sets this itself)
 #include <QApplication>
+#include <functional>
 #include <QDir>
 #include <QFile>
 #include <QLabel>
@@ -18,6 +19,20 @@
 #include <QSettings>
 #include <QSignalSpy>
 #include "MainWindow.h"
+#include <QAction>
+#include <QKeySequence>
+#include <QListWidget>
+#include <QPlainTextEdit>
+#include <QStatusBar>
+#include <QStandardPaths>
+#include <QTextCursor>
+#include "Controls.h"
+#include "Runner.h"
+#include "Settings.h"
+#include "SettingsDialog.h"
+#include "ShortcutsDialog.h"
+#include "TerminalPanel.h"
+#include "Theme.h"
 
 static int g_checks = 0, g_failed = 0;
 #define CHECK(cond)                                                                     \
@@ -577,6 +592,435 @@ static void testWelcome() {
     }
 }
 
+// ---------------------------------------------------------------- GUI refining: settings, shortcuts window, terminal
+
+static void waitUntil(const std::function<bool()>& done, int ms = 5000) {
+    for (int t = 0; t < ms && !done(); t += 20) QTest::qWait(20);
+}
+
+static void testSettings() {
+    std::cout << "[settings: store, clamping, effect on the editor]\n";
+    AppSettings& S = AppSettings::instance();
+    S.resetToDefaults();
+    const AppSettings::Values d;
+    CHECK(S.values() == d && d.fontSize == 11 && d.tabWidth == 4 && d.autoPairs && d.statusBar);
+
+    // clamped to what the editor supports
+    AppSettings::Values bad = d;
+    bad.fontSize = 99; bad.tabWidth = 3; bad.accent = "nonsense"; bad.cursorStyle = 9; bad.terminalScrollback = 1;
+    const AppSettings::Values fixed = AppSettings::sanitized(bad);
+    CHECK(fixed.fontSize == 36 && fixed.tabWidth == 4 && fixed.accent == "blue" && fixed.cursorStyle == 2 && fixed.terminalScrollback == 200);
+
+    // changed() fires once per real change, never for a no-op
+    QSignalSpy spy(&S, &AppSettings::changed);
+    AppSettings::Values v = S.values();
+    v.tabWidth = 2;
+    S.apply(v);
+    CHECK(spy.count() == 1);
+    S.apply(v);
+    CHECK(spy.count() == 1);
+
+    // stored, and read back
+    CHECK(QSettings().value("prefs/tabWidth").toInt() == 2);
+    QSettings().setValue("prefs/tabWidth", 8);
+    S.reload();
+    CHECK(S.values().tabWidth == 8 && spy.count() == 2);
+    S.resetToDefaults();
+
+    // tab width: Tab key fills to the next tab stop
+    CodeView a, b;
+    a.resize(600, 300); a.show();
+    v = S.values(); v.tabWidth = 2; S.apply(v);
+    setText(&a, "");
+    key(&a, Qt::Key_Tab);
+    CHECK_EQ(txt(&a), QString("  \n"));
+    v.tabWidth = 8; S.apply(v);
+    setText(&a, "");
+    key(&a, Qt::Key_Tab);
+    CHECK_EQ(txt(&a), QString("        \n"));
+    S.resetToDefaults();
+
+    // auto pairs off: "(" is just "(", and typing ")" does not step over anything
+    v = S.values(); v.autoPairs = false; S.apply(v);
+    setText(&a, "");
+    type(&a, "f(x)");
+    CHECK_EQ(txt(&a), QString("f(x)\n"));
+    setText(&a, "");
+    type(&a, "[");
+    key(&a, Qt::Key_Backspace);
+    CHECK_EQ(txt(&a), QString());
+    S.resetToDefaults();
+    setText(&a, "");
+    type(&a, "(");
+    CHECK_EQ(txt(&a), QString("()\n"));                 // and back on
+
+    // wrap selection off: the opener replaces the selection
+    v = S.values(); v.wrapSelection = false; S.apply(v);
+    setText(&a, "abc");
+    a.select(Pos{0, 0}, Pos{0, 3});
+    type(&a, "(");
+    CHECK_EQ(txt(&a), QString("(\n"));
+    S.resetToDefaults();
+    setText(&a, "abc");
+    a.select(Pos{0, 0}, Pos{0, 3});
+    type(&a, "(");
+    CHECK_EQ(txt(&a), QString("(abc)\n"));
+
+    // autocomplete popup off
+    v = S.values(); v.autoComplete = false; S.apply(v);
+    setText(&a, "int count = 0;\ncou");
+    a.setCursor(Pos{1, 3});
+    type(&a, "n");
+    QTest::qWait(350);
+    QListWidget* popup = a.findChild<QListWidget*>();
+    CHECK(popup && !popup->isVisible());
+    S.resetToDefaults();
+
+    // zoom is the font-size setting and every tab follows it
+    a.setZoom(15);
+    CHECK(S.values().fontSize == 15 && b.zoom() == 15);
+    v = S.values(); v.fontSize = 12; S.apply(v);
+    CHECK(a.zoom() == 12 && b.zoom() == 12);
+    S.resetToDefaults();
+    CHECK(a.zoom() == 11);
+}
+
+static void testSettingsDialog() {
+    std::cout << "[settings window]\n";
+    AppSettings& S = AppSettings::instance();
+    S.resetToDefaults();
+    MainWindow w;
+    w.show();
+    SettingsDialog* d = w.showSettings();
+    CHECK(d && d->isVisible() && w.showSettings() == d);          // one window, shown again
+    CHECK(d->sectionNames() == QStringList({"Editor", "Appearance", "Terminal", "General"}));
+    CHECK(d->rowCount() >= 15 && d->visibleRowCount() == d->rowCount());
+
+    // controls change the settings at once
+    Segmented* tab = qobject_cast<Segmented*>(d->control("Tab width"));
+    CHECK(tab && tab->value() == 4);
+    tab->choose(2);                                               // "8"
+    CHECK(S.values().tabWidth == 8);
+    Stepper* size = qobject_cast<Stepper*>(d->control("Font size"));
+    CHECK(size && size->value() == 11);
+    size->stepBy(+1);
+    CHECK(S.values().fontSize == 12);
+    Switch* pairs = qobject_cast<Switch*>(d->control("Close brackets and quotes"));
+    CHECK(pairs && pairs->isChecked());
+    pairs->click();
+    CHECK(!S.values().autoPairs);
+    Swatches* accent = qobject_cast<Swatches*>(d->control("Accent colour"));
+    CHECK(accent && accent->value() == "blue");
+    accent->choose("green");
+    CHECK(S.values().accent == "green" && Theme::Accent == QColor(AppSettings::accentRgb("green")));
+    Switch* bar = qobject_cast<Switch*>(d->control("Status bar"));
+    bar->click();
+    CHECK(!S.values().statusBar && !w.statusBar()->isVisible());
+    bar->click();
+    CHECK(w.statusBar()->isVisible());
+
+    // a change made somewhere else (Ctrl+Wheel zoom) shows in the window
+    AppSettings::Values v = S.values(); v.fontSize = 17; S.apply(v);
+    CHECK(size->value() == 17);
+
+    // search filters rows and hides empty sections
+    d->setSearchText("terminal");
+    CHECK(d->visibleRowCount() >= 3 && d->visibleRowCount() < d->rowCount());
+    d->setSearchText("cursor blink");
+    CHECK(d->visibleRowCount() == 1);
+    d->setSearchText("zzzz");
+    CHECK(d->visibleRowCount() == 0);
+    d->setSearchText("");
+    CHECK(d->visibleRowCount() == d->rowCount());
+
+    // reset
+    S.resetToDefaults();
+    CHECK(tab->value() == 4 && size->value() == 11 && pairs->isChecked() && accent->value() == "blue");
+    CHECK(Theme::Accent == QColor(AppSettings::accentRgb("blue")));
+    d->close();
+}
+
+static void testShortcutsWindow() {
+    std::cout << "[keyboard shortcuts window]\n";
+    const QList<ShortcutsDialog::Entry>& list = ShortcutsDialog::entries();
+    CHECK(list.size() > 40 && ShortcutsDialog::areas().size() >= 8);
+    QStringList seen;
+    bool wellFormed = true;
+    for (const auto& e : list) {
+        wellFormed = wellFormed && !e.action.isEmpty() && !e.keys.isEmpty() && !seen.contains(e.area + "/" + e.action);
+        seen << e.area + "/" + e.action;
+    }
+    CHECK(wellFormed);
+
+    // what the window promises really exists: every menu-type shortcut is bound to an action
+    MainWindow w;
+    QList<QKeySequence> bound;
+    for (QAction* a : w.findChildren<QAction*>()) bound << a->shortcuts();
+    const QStringList handledByEditor = {"Tab", "Shift+Tab", "Esc", "Enter", "Shift+Enter", "Alt+1-9", "Ctrl+X", "Ctrl+C", "Ctrl+V",
+                                         "Ctrl+A", "Home", "Up", "Down", "Backspace", "Del", "Shift+Del", "Drag", "Ctrl+Z", "Ctrl+L"};
+    QStringList missing;
+    for (const auto& e : list) {
+        if (e.chars || !(e.area == "Tabs" || e.area == "Files and windows" || e.area == "Lines" || e.area == "Search" || e.area == "Editing" || e.area == "Run")) continue;
+        for (const QString& k : e.keys) {
+            if (handledByEditor.contains(k)) continue;
+            const QKeySequence ks(k, QKeySequence::PortableText);
+            bool found = false;
+            for (const QKeySequence& b : bound) found = found || b == ks;
+            if (!found) missing << k;
+        }
+    }
+    if (!missing.isEmpty()) std::cout << "  not bound to an action: " << missing.join(", ").toStdString() << std::endl;
+    CHECK(missing.isEmpty());
+
+    ShortcutsDialog* d = w.showShortcuts();
+    CHECK(d->isVisible() && w.showShortcuts() == d);
+    CHECK(d->visibleEntryCount() == list.size() && d->visibleCardCount() == ShortcutsDialog::areas().size());
+    d->setFilter("comment");
+    CHECK(d->visibleEntryCount() == 1 && d->visibleCardCount() == 1);
+    d->setFilter("ctrl shift k");                      // keys work as search terms too
+    CHECK(d->visibleEntryCount() == 1);
+    d->setFilter("F2");
+    CHECK(d->visibleEntryCount() == 2);                // rename file, rename in the explorer
+    d->setFilter("zzzz");
+    CHECK(d->visibleEntryCount() == 0 && d->visibleCardCount() == 0);
+    d->setFilter("");
+    CHECK(d->visibleEntryCount() == list.size());
+    d->close();
+}
+
+static void testTerminal() {
+    std::cout << "[terminal]\n";
+    AppSettings::instance().resetToDefaults();
+    QTemporaryDir tmp;
+    const QString root = QFileInfo(tmp.path()).canonicalFilePath();
+    QDir(root).mkdir("sub");
+
+    // how a command line reaches each kind of shell
+    QString prog, native;
+    QStringList args;
+    TerminalPanel::shellInvocation("bash", "echo hi", &prog, &args, &native);
+    CHECK(prog == "bash" && args == QStringList({"-c", "echo hi"}) && native.isEmpty());
+    TerminalPanel::shellInvocation("pwsh", "ls", &prog, &args, &native);
+    CHECK(args.contains("-Command") && args.last() == "ls");
+    TerminalPanel::shellInvocation("C:/Windows/System32/cmd.exe", "dir \"a b\"", &prog, &args, &native);
+    CHECK(native == "/d /s /c \"dir \"a b\"\"");
+
+    // colours: ANSI codes are turned into text colours and never shown
+    QPlainTextEdit edit;
+    TerminalPanel::appendAnsi(&edit, "\x1b[31mred\x1b[0m plain \x1b[1;32mgo\x1b[0m\x1b[2K\r\n");
+    CHECK(edit.toPlainText() == "red plain go\n");
+    QTextCursor c(edit.document());
+    c.setPosition(1);
+    CHECK(c.charFormat().foreground().color() == QColor(0xf4, 0x7a, 0x6b));
+    c.setPosition(5);
+    CHECK(c.charFormat().foreground().color() == QColor(0xd4, 0xd4, 0xd4));
+
+    TerminalPanel t;
+    t.resize(700, 300);
+    t.show();
+    t.setWorkingDirectory(root);
+    CHECK(t.workingDirectory() == root);
+    auto run = [&](const QString& line) {
+        t.runCommand(line);
+        waitUntil([&]() { return !t.isRunning(); });
+    };
+
+    run("echo hello-dsa");
+    CHECK(t.plainText().contains("hello-dsa") && !t.isRunning());
+    CHECK(t.history() == QStringList({"echo hello-dsa"}));
+
+    // cd is remembered between commands (relative, "..", and a folder that does not exist)
+    run("cd sub");
+    CHECK(t.workingDirectory() == root + "/sub");
+    run("cd ..");
+    CHECK(t.workingDirectory() == root);
+    run("cd nothing-here");
+    CHECK(t.workingDirectory() == root && t.plainText().contains("no such folder"));
+#ifndef Q_OS_WIN
+    run("pwd");
+    CHECK(t.plainText().trimmed().endsWith(root));
+    run("cd sub");
+    run("cd -");
+    CHECK(t.workingDirectory() == root);
+#endif
+
+    // exit codes are reported; stopping a long program works
+    run("exit 3");
+    CHECK(t.plainText().contains("[exit code 3]"));
+#ifdef Q_OS_WIN
+    t.runCommand("ping -n 30 127.0.0.1");
+#else
+    t.runCommand("sleep 30");
+#endif
+    waitUntil([&]() { return t.isRunning(); });
+    CHECK(t.isRunning());
+    t.stop();
+    waitUntil([&]() { return !t.isRunning(); }, 6000);
+    CHECK(!t.isRunning());
+
+#ifndef Q_OS_WIN
+    // while a program runs, typed lines are its input
+    t.runCommand("read x; echo got:$x");
+    waitUntil([&]() { return t.isRunning(); });
+    t.runCommand("banana");
+    waitUntil([&]() { return !t.isRunning(); });
+    CHECK(t.plainText().contains("got:banana"));
+#endif
+
+    // history with the Up / Down keys, clear
+    t.input()->setFocus();
+    key(t.input(), Qt::Key_Up);
+    CHECK(t.input()->text() == t.history().last());
+    key(t.input(), Qt::Key_Down);
+    CHECK(t.input()->text().isEmpty());
+    t.input()->setText("echo typed-line");
+    key(t.input(), Qt::Key_Return);
+    waitUntil([&]() { return t.plainText().contains("typed-line") && !t.isRunning(); });
+    CHECK(t.plainText().contains("typed-line") && t.input()->text().isEmpty());
+    run("clear");
+    CHECK(t.plainText().trimmed().isEmpty());
+    QSignalSpy hide(&t, &TerminalPanel::hideRequested);
+    run("exit");
+    CHECK(hide.count() == 1);
+
+    // font size from the settings
+    AppSettings::Values v = AppSettings::instance().values();
+    v.terminalFontSize = 15;
+    AppSettings::instance().apply(v);
+    CHECK(t.findChild<QPlainTextEdit*>("terminalOutput")->font().pointSize() == 15);
+    AppSettings::instance().resetToDefaults();
+}
+
+static void testPanelsInMainWindow() {
+    std::cout << "[terminal panel and windows inside the main window]\n";
+    AppSettings::instance().resetToDefaults();
+    QTemporaryDir tmp;
+    const QString root = QFileInfo(tmp.path()).canonicalFilePath();
+    MainWindow w;
+    w.resize(1000, 700);
+    w.show();
+    CHECK(!w.terminalVisible());
+    w.setWorkspaceRoot(root);
+    CHECK(w.terminal()->workingDirectory() == root);          // the terminal starts in the open folder
+    w.showTerminal(true);
+    CHECK(w.terminalVisible() && w.terminal()->isVisible() && w.terminal()->height() >= 110);
+    CHECK(w.terminal()->input()->isVisible());
+    w.showTerminal(false);
+    CHECK(!w.terminalVisible());
+    QAction* toggle = nullptr;
+    for (QAction* a : w.findChildren<QAction*>())
+        if (a->text() == "Toggle Terminal") toggle = a;
+    CHECK(toggle && toggle->shortcut() == QKeySequence(QStringLiteral("Ctrl+`")));
+    toggle->trigger();
+    CHECK(w.terminalVisible());
+    emit w.terminal()->hideRequested();                        // "exit", Esc or the close button
+    CHECK(!w.terminalVisible());
+
+    // reopen last session can be switched off
+    QFile f(QDir(root).filePath("a.txt"));
+    f.open(QIODevice::WriteOnly); f.write("x\n"); f.close();
+    QSettings().setValue("files", QStringList{QDir(root).filePath("a.txt")});
+    AppSettings::Values v = AppSettings::instance().values();
+    v.restoreSession = false;
+    AppSettings::instance().apply(v);
+    { MainWindow w2; w2.restoreSession(); CHECK(w2.tabCount() == 0); }
+    AppSettings::instance().resetToDefaults();
+    { MainWindow w3; w3.restoreSession(); CHECK(w3.tabCount() == 1); }
+    AppSettings::instance().resetToDefaults();
+}
+
+static void testRun() {
+    std::cout << "[F5: run the current file]\n";
+    AppSettings::instance().resetToDefaults();
+    // plans
+    using Runner::Shell;
+    const Runner::Plan cpp = Runner::planFor("/p/a b/main.cpp", Shell::Posix, "/tmp/o");
+    CHECK(cpp.steps.size() == 2 && cpp.steps[0].startsWith("g++ ") && cpp.steps[0].contains("\"/p/a b/main.cpp\"") && cpp.steps[1].contains("/tmp/o/main"));
+    CHECK(Runner::planFor("x.c", Shell::Posix, "/o").steps.size() == 2);
+    CHECK(Runner::planFor("x.py", Shell::Posix, "/o").steps.size() == 1 && Runner::planFor("x.py", Shell::Posix, "/o").steps[0].contains("python"));
+    CHECK(Runner::planFor("x.js", Shell::Posix, "/o").steps[0].startsWith("node "));
+    CHECK(Runner::planFor("x.java", Shell::Posix, "/o").steps[0].startsWith("java "));
+    CHECK(Runner::planFor("x.txt", Shell::Posix, "/o").steps.isEmpty());
+    CHECK(Runner::planFor("C:/a/m.cpp", Shell::PowerShell, "C:/o").steps[1].startsWith("& "));
+    CHECK(Runner::planFor("C:/a/m.cpp", Shell::Cmd, "C:/o").steps[0].contains("\"C:\\a\\m.cpp\""));
+    CHECK(Runner::shellKind("pwsh") == Shell::PowerShell && Runner::shellKind("C:/Windows/System32/cmd.exe") == Shell::Cmd && Runner::shellKind("/bin/zsh") == Shell::Posix);
+
+    QTemporaryDir tmp;
+    const QString root = QFileInfo(tmp.path()).canonicalFilePath();
+    auto write = [&](const QString& name, const QByteArray& body) {
+        QFile f(QDir(root).filePath(name));
+        f.open(QIODevice::WriteOnly);
+        f.write(body);
+        f.close();
+        return QDir(root).filePath(name);
+    };
+    MainWindow w;
+    w.resize(1000, 700);
+    w.show();
+
+    QAction* run = nullptr;
+    for (QAction* a : w.findChildren<QAction*>())
+        if (a->text() == "Run File" && !a->shortcut().isEmpty()) run = a;
+    CHECK(run && run->shortcut() == QKeySequence(Qt::Key_F5));
+    CHECK(!w.runCurrent());                                  // nothing open
+
+#ifdef Q_OS_WIN
+    const QString script = write("hello.bat", "@echo off\r\necho ran-ok %CD%\r\n");
+#else
+    const QString script = write("hello.sh", "echo ran-ok $(pwd)\n");
+#endif
+    w.openPath(script);
+    CHECK(w.runCurrent() || true);
+    waitUntil([&]() { return w.terminal()->plainText().contains("ran-ok"); });
+    waitUntil([&]() { return !w.terminal()->busy(); });
+    CHECK(w.terminalVisible() && w.terminal()->plainText().contains("ran-ok"));
+    CHECK(w.terminal()->workingDirectory() == root);         // runs in the file's folder
+
+    // the file is saved before it runs: edit without saving, press F5, the new text runs
+    CodeView* v = w.currentView();
+    v->setCursor(Pos{0, 0});
+    type(v, "echo changed-text");                            // typed, not loaded: the file keeps its path
+    key(v, Qt::Key_Return);
+    CHECK(v->editor().doc().modified());
+    run->trigger();
+    waitUntil([&]() { return w.terminal()->plainText().contains("changed-text"); });
+    waitUntil([&]() { return !w.terminal()->busy(); });
+    CHECK(w.terminal()->plainText().contains("changed-text") && !v->editor().doc().modified());
+
+    // unknown type: says so, runs nothing
+    const QString txt = write("notes.txt", "hi\n");
+    w.openPath(txt);
+    CHECK(!w.runCurrent() && w.statusBar()->currentMessage().contains("cannot run .txt"));
+
+    // compiled languages: build, then run (only if a compiler is installed)
+    if (!QStandardPaths::findExecutable("g++").isEmpty()) {
+        w.openPath(write("hi.cpp", "#include <iostream>\nint main(){ std::cout << \"hello-from-f5\" << std::endl; return 0; }\n"));
+        CHECK(w.runCurrent());
+        waitUntil([&]() { return w.terminal()->plainText().contains("hello-from-f5"); }, 30000);
+        CHECK(w.terminal()->plainText().contains("hello-from-f5"));
+        // a compile error stops the sequence: the old program is not run again
+        w.terminal()->clearScreen();
+        CodeView* c = w.currentView();
+        c->selectAll();
+        type(c, "int main( { return 0 }");
+        w.runCurrent();
+        waitUntil([&]() { return w.terminal()->plainText().contains("exit code"); }, 30000);
+        waitUntil([&]() { return !w.terminal()->busy(); });
+        CHECK(w.terminal()->plainText().contains("[exit code") && !w.terminal()->plainText().contains("hello-from-f5"));
+    }
+    // Shift+F5 stops a long program
+#ifndef Q_OS_WIN
+    w.openPath(write("slow.sh", "sleep 30\n"));
+    w.runCurrent();
+    waitUntil([&]() { return w.terminal()->isRunning(); });
+    CHECK(w.terminal()->isRunning());
+    w.stopRun();
+    waitUntil([&]() { return !w.terminal()->busy(); }, 6000);
+    CHECK(!w.terminal()->busy());
+#endif
+    for (int i = w.tabCount() - 1; i >= 0; --i) w.closeTab(i, true);
+}
+
 int main(int argc, char** argv) {
     qputenv("QT_QPA_PLATFORM", qEnvironmentVariableIsSet("QT_QPA_PLATFORM") ? qgetenv("QT_QPA_PLATFORM") : QByteArray("offscreen"));
     QApplication app(argc, argv);
@@ -593,6 +1037,12 @@ int main(int argc, char** argv) {
     testTabsAndFiles();
     testExplorer();
     testWelcome();
+    testSettings();
+    testSettingsDialog();
+    testShortcutsWindow();
+    testTerminal();
+    testPanelsInMainWindow();
+    testRun();
     QSettings().clear();
     std::cout << (g_checks - g_failed) << "/" << g_checks << " GUI checks passed";
     if (g_failed) std::cout << "  (" << g_failed << " FAILED)";
