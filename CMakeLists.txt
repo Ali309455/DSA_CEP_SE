@@ -89,6 +89,24 @@ if(BUILD_GUI)
       set(DEVPAD_ICON "${CMAKE_CURRENT_SOURCE_DIR}/gui/devpad.ico")
       configure_file(gui/devpad.rc.in "${CMAKE_CURRENT_BINARY_DIR}/devpad.rc" @ONLY)
       target_sources(devpad PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/devpad.rc")
+
+      # Copy the Qt DLLs and plugins next to the .exe after every build, so it starts by double-click
+      # without adding anything to PATH by hand. Needs windeployqt, which sits in Qt's bin folder.
+      get_target_property(_qt_core_loc Qt${QT_VERSION_MAJOR}::Core IMPORTED_LOCATION)
+      find_program(DEVPAD_WINDEPLOYQT NAMES windeployqt6 windeployqt
+                   HINTS "${Qt${QT_VERSION_MAJOR}_DIR}/../../../bin" "${CMAKE_PREFIX_PATH}/bin")
+      if(NOT DEVPAD_WINDEPLOYQT AND _qt_core_loc)
+        get_filename_component(_qt_bin "${_qt_core_loc}" DIRECTORY)
+        find_program(DEVPAD_WINDEPLOYQT NAMES windeployqt6 windeployqt HINTS "${_qt_bin}")
+      endif()
+      if(DEVPAD_WINDEPLOYQT)
+        message(STATUS "DevPad GUI: Qt DLLs will be copied next to the programs by ${DEVPAD_WINDEPLOYQT}")
+        add_custom_command(TARGET devpad POST_BUILD
+          COMMAND "${DEVPAD_WINDEPLOYQT}" --no-translations --no-system-d3d-compiler --no-opengl-sw "$<TARGET_FILE:devpad>"
+          COMMENT "windeployqt: copying Qt DLLs for devpad")
+      else()
+        message(STATUS "DevPad GUI: windeployqt not found - copy the Qt DLLs next to devpad.exe yourself")
+      endif()
     endif()
 
     # GUI smoke tests: drive the real widgets without a screen (QT_QPA_PLATFORM=offscreen)
@@ -102,6 +120,11 @@ if(BUILD_GUI)
       target_link_libraries(gui_tests PRIVATE engine Qt${QT_VERSION_MAJOR}::Widgets Qt${QT_VERSION_MAJOR}::Test)
       if(WIN32)
         target_link_libraries(gui_tests PRIVATE dwmapi)
+        if(DEVPAD_WINDEPLOYQT)
+          add_custom_command(TARGET gui_tests POST_BUILD
+            COMMAND "${DEVPAD_WINDEPLOYQT}" --no-translations --no-system-d3d-compiler --no-opengl-sw "$<TARGET_FILE:gui_tests>"
+            COMMENT "windeployqt: copying Qt DLLs for gui_tests")
+        endif()
       endif()
       add_test(NAME gui_tests COMMAND gui_tests)
       set_tests_properties(gui_tests PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")

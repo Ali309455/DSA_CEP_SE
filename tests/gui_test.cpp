@@ -293,7 +293,7 @@ static void testTabsAndFiles() {
     CHECK(dir.isValid());
     auto write = [&](const char* name, const char* body) {
         QFile f(dir.filePath(name));
-        f.open(QIODevice::WriteOnly);
+        (void)f.open(QIODevice::WriteOnly);
         f.write(body);
         return dir.filePath(name);
     };
@@ -303,7 +303,7 @@ static void testTabsAndFiles() {
 
     MainWindow w;
     w.show();
-    QApplication::setActiveWindow(&w);
+    w.activateWindow();
     (void)QTest::qWaitForWindowActive(&w);
     CHECK(w.tabCount() == 0 && w.welcomeShown());      // nothing open: the welcome page
     w.newTab();
@@ -388,7 +388,7 @@ static void testTabsAndFiles() {
     CHECK(w.currentView()->editor().doc().modified() && w.currentView()->editor().canUndo());
     QTest::keyClick(w.currentView(), Qt::Key_S, Qt::ControlModifier);
     QFile saved(dir.filePath("beta.cpp"));
-    saved.open(QIODevice::ReadOnly);
+    (void)saved.open(QIODevice::ReadOnly);
     CHECK(QString::fromUtf8(saved.readAll()).startsWith("// int a = 1;"));
 
     // closing tabs
@@ -420,7 +420,7 @@ static void testExplorer() {
     QDir(root).mkpath("src");
     auto write = [&](const QString& rel, const char* body) {
         QFile f(QDir(root).filePath(rel));
-        f.open(QIODevice::WriteOnly);
+        (void)f.open(QIODevice::WriteOnly);
         f.write(body);
         return QDir(root).filePath(rel);
     };
@@ -431,7 +431,7 @@ static void testExplorer() {
 
     MainWindow w;
     w.show();
-    QApplication::setActiveWindow(&w);
+    w.activateWindow();
     (void)QTest::qWaitForWindowActive(&w);
     FileExplorer* ex = w.explorer();
     CHECK(ex != nullptr && ex->root().isEmpty());
@@ -461,7 +461,7 @@ static void testExplorer() {
     CHECK(pathOf(w.currentView()) == at("memo.txt") && w.tabTitle(0).startsWith("memo.txt"));
     CHECK(w.currentView()->editor().doc().modified() && txt(w.currentView()) == "xhello\n");
     QTest::keyClick(w.currentView(), Qt::Key_S, Qt::ControlModifier);
-    { QFile f(at("memo.txt")); f.open(QIODevice::ReadOnly); CHECK(f.readAll() == "xhello\n"); }
+    { QFile f(at("memo.txt")); (void)f.open(QIODevice::ReadOnly); CHECK(f.readAll() == "xhello\n"); }
     CHECK(ex->renamePath(at("memo.txt"), "todo.md", &err).isEmpty() && !err.isEmpty());   // would overwrite
 
     // renaming a folder moves the open tabs inside it
@@ -555,7 +555,7 @@ static void testWelcome() {
     QTemporaryDir tmp;
     const QString root = QFileInfo(tmp.path()).canonicalFilePath();
     QFile f(QDir(root).filePath("hello.cpp"));
-    f.open(QIODevice::WriteOnly);
+    (void)f.open(QIODevice::WriteOnly);
     f.write("int x;\n");
     f.close();
     const QString file = QDir(root).filePath("hello.cpp");
@@ -918,7 +918,7 @@ static void testPanelsInMainWindow() {
 
     // reopen last session can be switched off
     QFile f(QDir(root).filePath("a.txt"));
-    f.open(QIODevice::WriteOnly); f.write("x\n"); f.close();
+    (void)f.open(QIODevice::WriteOnly); f.write("x\n"); f.close();
     QSettings().setValue("files", QStringList{QDir(root).filePath("a.txt")});
     AppSettings::Values v = AppSettings::instance().values();
     v.restoreSession = false;
@@ -949,7 +949,7 @@ static void testRun() {
     const QString root = QFileInfo(tmp.path()).canonicalFilePath();
     auto write = [&](const QString& name, const QByteArray& body) {
         QFile f(QDir(root).filePath(name));
-        f.open(QIODevice::WriteOnly);
+        (void)f.open(QIODevice::WriteOnly);
         f.write(body);
         f.close();
         return QDir(root).filePath(name);
