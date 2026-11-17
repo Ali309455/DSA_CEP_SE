@@ -116,7 +116,7 @@ public:
     }
 
 private:
-    static const size_t kInitialBuckets = 16;
+    static constexpr size_t kInitialBuckets = 16;
     static constexpr double kMaxLoad = 0.75;
 
     DynArray<Node*> buckets_;

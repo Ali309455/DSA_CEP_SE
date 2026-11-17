@@ -58,6 +58,18 @@ static void printHelp() {
         "    accept <line> <col> <word>  finish the word before a position with <word> (one undo step)\n"
         "    dictadd <word>              add a word to the autocomplete dictionary\n"
         "    dictdel <word>              remove a word from the dictionary\n"
+        "  Snippets (hash table, phase 4):\n"
+        "    expand <line> <col>         replace the snippet word just before a position with its body\n"
+        "                                (one undo step; the new cursor position is printed)\n"
+        "    snippet list                all triggers, alphabetical\n"
+        "    snippet show <trigger>      print one snippet\n"
+        "    snippet add <trigger> <body>  add / replace a snippet; quote the body: \"if ($0) {\\n    \\n}\"\n"
+        "                                ($0 = where the cursor goes, $$ = a real dollar sign)\n"
+        "    snippet del <trigger>       remove a snippet\n"
+        "    snippet load <file>         add the snippets of a file (trigger<TAB>body per line)\n"
+        "    snippet save <file>         write all snippets to a file\n"
+        "    snippet defaults            (re)load the built-in C++ snippets\n"
+        "    snippet stats               hash table size, buckets, load factor, longest chain\n"
         "  help                          show this list\n";
 }
 
@@ -214,7 +226,52 @@ static std::string describe(const SearchOptions& o) {
 }
 
 // Returns false when the user wants to quit.
-static bool execute(Editor& ed, Autocomplete& ac, const std::string& input) {
+static void snippetCommand(SnippetTable& sn, const std::string& args) {
+    const char* usage = "Usage: snippet list | show <trigger> | add <trigger> <body> | del <trigger> | load <file> | save <file> | defaults | stats";
+    size_t i = 0;
+    std::string sub;
+    if (!takeArg(args, i, sub)) throw std::invalid_argument(usage);
+    sub = toLower(sub);
+    std::string a1, a2, extra;
+    if (sub == "list") {
+        if (takeArg(args, i, extra)) throw std::invalid_argument("Usage: snippet list");
+        DynArray<std::string> keys = sn.triggers();
+        if (keys.empty()) { std::cout << "There are no snippets (try 'snippet defaults').\n"; return; }
+        std::cout << keys.size() << " snippet(s):\n";
+        for (size_t k = 0; k < keys.size(); ++k)
+            std::cout << "  " << keys[k] << "   " << preview(sn.find(keys[k])->body) << "\n";
+    } else if (sub == "show") {
+        if (!takeArg(args, i, a1) || takeArg(args, i, extra)) throw std::invalid_argument("Usage: snippet show <trigger>");
+        const Snippet* s = sn.find(a1);
+        if (!s) throw std::invalid_argument("There is no snippet \"" + preview(a1) + "\".");
+        std::cout << s->trigger << " =\n" << s->body << "\n";
+    } else if (sub == "add") {
+        if (!takeArg(args, i, a1) || !takeArg(args, i, a2) || takeArg(args, i, extra))
+            throw std::invalid_argument("Usage: snippet add <trigger> <body>   (put the body in \"quotes\"; \\n is a line break)");
+        bool fresh = sn.add(a1, a2);                 // throws with the reason when invalid
+        std::cout << (fresh ? "Added" : "Replaced") << " snippet \"" << a1 << "\" (" << sn.size() << " in total).\n";
+    } else if (sub == "del" || sub == "remove") {
+        if (!takeArg(args, i, a1) || takeArg(args, i, extra)) throw std::invalid_argument("Usage: snippet del <trigger>");
+        if (!sn.remove(a1)) throw std::invalid_argument("There is no snippet \"" + preview(a1) + "\".");
+        std::cout << "Removed \"" << a1 << "\" (" << sn.size() << " left).\n";
+    } else if (sub == "load" || sub == "save") {
+        if (!takeArg(args, i, a1) || takeArg(args, i, extra)) throw std::invalid_argument("Usage: snippet " + sub + " <file>");
+        IOResult r = (sub == "load") ? sn.loadFromFile(a1) : sn.saveToFile(a1);
+        std::cout << (r.ok ? "" : "Error: ") << r.message << "\n";
+    } else if (sub == "defaults") {
+        if (takeArg(args, i, extra)) throw std::invalid_argument("Usage: snippet defaults");
+        sn.loadDefaults();
+        std::cout << "Built-in snippets loaded (" << sn.size() << " snippets).\n";
+    } else if (sub == "stats") {
+        if (takeArg(args, i, extra)) throw std::invalid_argument("Usage: snippet stats");
+        std::cout << sn.size() << " snippet(s) in " << sn.bucketCount() << " buckets, longest chain "
+                  << sn.longestChain() << ".\n";
+    } else {
+        throw std::invalid_argument("Unknown snippet command '" + preview(sub) + "'. " + usage);
+    }
+}
+
+static bool execute(Editor& ed, Autocomplete& ac, SnippetTable& sn, const std::string& input) {
     const Document& doc = ed.doc();
     DynArray<std::string> w;
     std::string rest;
@@ -447,6 +504,16 @@ static bool execute(Editor& ed, Autocomplete& ac, const std::string& input) {
     } else if (cmd == "dictdel") {
         if (!ac.removeWord(rest)) throw std::invalid_argument("\"" + preview(rest) + "\" is not in the dictionary.");
         std::cout << "Removed \"" << rest << "\" (" << ac.dictionarySize() << " words left).\n";
+    } else if (cmd == "expand") {
+        size_t got = takeWords(rest, 2, w, rest);
+        if (got < 2 || !rest.empty()) throw std::invalid_argument("Usage: expand <line> <col>");
+        needNumbers(w, 2, n, "expand <line> <col>");
+        Pos at = userPos(doc, n[0], n[1]);
+        SnippetExpansion r = applySnippet(ed, sn, at);
+        if (!r.expanded) std::cout << r.reason << "\n";
+        else std::cout << "Expanded \"" << r.trigger << "\"; cursor now at " << (r.cursor.line + 1) << ":" << (r.cursor.col + 1) << ".\n";
+    } else if (cmd == "snippet" || cmd == "snippets") {
+        snippetCommand(sn, rest);
     } else {
         std::cout << "Unknown command '" << cmd << "'. Type 'help' for the list.\n";
     }
@@ -456,13 +523,15 @@ static bool execute(Editor& ed, Autocomplete& ac, const std::string& input) {
 int main() {
     Editor ed;
     Autocomplete ac;
+    SnippetTable snippets;
+    snippets.loadDefaults();
     std::cout << "Text Editor (console)  -  type 'help' for commands.\n";
     std::string input;
     while (true) {
         std::cout << (ed.doc().modified() ? "*" : "") << "> " << std::flush;
         if (!std::getline(std::cin, input)) break;  // end of input
         try {
-            if (!execute(ed, ac, input)) break;
+            if (!execute(ed, ac, snippets, input)) break;
         } catch (const std::exception& e) {
             std::cout << "Error: " << e.what() << "\n";
         }

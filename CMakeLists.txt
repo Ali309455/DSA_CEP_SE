@@ -22,6 +22,7 @@ add_library(engine STATIC
   engine/Editor.cpp
   engine/FileIO.cpp
   engine/Search.cpp
+  engine/Snippets.cpp
   engine/Trie.cpp
   engine/Workspace.cpp)
 target_include_directories(engine PUBLIC engine)
@@ -43,7 +44,6 @@ endif()
 enable_testing()
 add_test(NAME engine_tests COMMAND engine_tests)
 
-# Snippets (hash table) are in next_part_snippets/ and join the build in part 4b.
 
 # ---- Phase 5: DevPad, the Qt Widgets GUI (Qt 6, or Qt 5 as a fallback) ----
 # Configure with -DBUILD_GUI=OFF to build only the engine, the tests and the console editor.
