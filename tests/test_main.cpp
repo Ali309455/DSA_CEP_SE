@@ -16,6 +16,7 @@
 #include "Brackets.h"
 #include "Trie.h"
 #include "Snippets.h"
+#include "Diagnostics.h"
 #include "DynArray.h"
 #include "Document.h"
 #include "EditOps.h"
@@ -2623,6 +2624,119 @@ static void testSnippetRandomEditing() {
 }
 
 
+static void testDiagParse() {
+    section("Diagnostics: compiler output parser");
+    DynArray<Diagnostic> d = parseCompilerOutput("");
+    CHECK(d.empty());
+    d = parseCompilerOutput("a.cpp: In function 'int main()':\n"
+                            "a.cpp:3:13: error: expected primary-expression before ';' token\n"
+                            "    3 |   int x = ;\n"
+                            "      |             ^\n"
+                            "a.cpp:2:7: warning: unused variable 'y' [-Wunused-variable]\n"
+                            "a.cpp:1:1: note: declared here\n");
+    CHECK(d.size() == 3);
+    CHECK(d[0].severity == Severity::Error && d[0].line == 3 && d[0].col == 13 && d[0].file == "a.cpp");
+    CHECK(d[0].message == "expected primary-expression before ';' token" && d[0].source == "g++");
+    CHECK(d[1].severity == Severity::Warning && d[1].line == 2 && d[1].col == 7);
+    CHECK(d[2].severity == Severity::Note);
+    // no column, fatal error
+    d = parseCompilerOutput("x.cpp:9: error: bad thing\nx.cpp:1:10: fatal error: foo.h: No such file or directory\n");
+    CHECK(d.size() == 2 && d[0].line == 9 && d[0].col == 0 && d[0].severity == Severity::Error);
+    CHECK(d[1].line == 1 && d[1].col == 10 && d[1].message == "foo.h: No such file or directory");
+    // Windows paths, CRLF, colours
+    d = parseCompilerOutput("C:\\proj\\main.cpp:12:5: error: 'x' was not declared in this scope\r\n"
+                            "C:/proj/b.cpp:4:1: warning: no return statement\r\n");
+    CHECK(d.size() == 2 && d[0].file == "C:\\proj\\main.cpp" && d[0].line == 12 && d[0].col == 5);
+    CHECK(d[1].file == "C:/proj/b.cpp" && d[1].severity == Severity::Warning);
+    d = parseCompilerOutput("\x1b[01m\x1b[Ka.cpp:2:3:\x1b[m\x1b[K \x1b[01;31m\x1b[Kerror: \x1b[m\x1b[Kboom\n");
+    CHECK(d.size() == 1 && d[0].message == "boom" && d[0].line == 2 && d[0].col == 3);
+    // lines that are not diagnostics, "required from here", numbers in messages
+    d = parseCompilerOutput("a.cpp:5:3:   required from here\nnothing: to see here\n12:34: just numbers\n");
+    CHECK(d.empty());
+    d = parseCompilerOutput("a.cpp:5:3: error: expected ';' at 3:4 in 'a:b'\n");
+    CHECK(d.size() == 1 && d[0].message == "expected ';' at 3:4 in 'a:b'");
+    // linker and driver errors have no location
+    d = parseCompilerOutput("/usr/bin/ld: m.o: in function `main':\nm.cpp:(.text+0x9): undefined reference to `foo()'\n"
+                            "collect2: error: ld returned 1 exit status\n"
+                            "g++: error: nofile.cpp: No such file or directory\n");
+    CHECK(d.size() == 2);
+    CHECK(d[0].line == 0 && d[0].severity == Severity::Error && d[0].message.find("undefined reference") == 0);
+    CHECK(d[1].line == 0 && d[1].message == "nofile.cpp: No such file or directory");
+    // clang flavour and a source-source label
+    d = parseCompilerOutput("t.cpp:1:5: error: unknown type name 'foo'\n", "clang");
+    CHECK(d.size() == 1 && d[0].source == "clang");
+    CHECK(countSeverity(d, Severity::Error) == 1 && countSeverity(d, Severity::Warning) == 0);
+    // flood protection
+    std::string flood;
+    for (int i = 0; i < 2000; ++i) flood += "f.cpp:" + std::to_string(i + 1) + ":1: error: e\n";
+    d = parseCompilerOutput(flood);
+    CHECK(d.size() == kMaxDiagnostics && d[0].line == 1);
+}
+
+static void testDiagBracketsAndSquiggle() {
+    section("Diagnostics: brackets -> list, squiggle length");
+    Document doc;
+    doc.loadFromString("int main() {\n  foo(1;\n}\n");
+    DynArray<Diagnostic> d = fromBrackets(checkBrackets(doc));
+    CHECK(d.size() == 1 && d[0].source == "brackets" && d[0].severity == Severity::Error);
+    CHECK(d[0].line == 2 && d[0].col == 6);                 // 1-based
+    CHECK(!d[0].message.empty());
+    doc.loadFromString("int main() { return 0; }\n");
+    CHECK(fromBrackets(checkBrackets(doc)).empty());
+    Document empty;
+    CHECK(fromBrackets(checkBrackets(empty)).empty());
+
+    CHECK(squiggleLength("int foo_1 = 5;", 4) == 5);       // identifier
+    CHECK(squiggleLength("int foo_1 = 5;", 0) == 3);
+    CHECK(squiggleLength("x = 12345;", 4) == 5);           // number
+    CHECK(squiggleLength("a = \"he\\\"llo\";", 4) == 9);   // whole string, escaped quote inside
+    CHECK(squiggleLength("a = \"open", 4) == 5);           // unterminated: to end of line
+    CHECK(squiggleLength("a = ;", 4) == 1);                // punctuation
+    CHECK(squiggleLength("a   b", 2) == 1);                // blank
+    CHECK(squiggleLength("abc", 3) == 1 && squiggleLength("abc", 99) == 1 && squiggleLength("", 0) == 1);
+}
+
+static void testDiagSyntaxCheck() {
+    section("Diagnostics: running g++ -fsyntax-only");
+    CHECK(isCompilableSource("a.cpp") && isCompilableSource("B.H") && isCompilableSource("dir.v2/x.cc"));
+    CHECK(!isCompilableSource("a.py") && !isCompilableSource("noext") && !isCompilableSource("a.cpp/readme"));
+    CHECK(syntaxCheckCompiler("a.c") == "gcc" && syntaxCheckCompiler("a.cpp") == "g++");
+    SyntaxCheckOptions custom;
+    custom.compiler = "clang++";
+    CHECK(syntaxCheckCompiler("a.c", custom) == "clang++");
+    DynArray<std::string> args = syntaxCheckArgs("a.cpp");
+    bool syn = false, plain = false;
+    for (size_t i = 0; i < args.size(); ++i) { if (args[i] == "-fsyntax-only") syn = true; if (args[i] == "-std=c++17") plain = true; }
+    CHECK(syn && plain && args[args.size() - 1] == "a.cpp");
+
+    SyntaxCheckResult none = runSyntaxCheck("");
+    CHECK(!none.ran && !none.message.empty());
+    SyntaxCheckOptions bad;
+    bad.compiler = "no_such_compiler_xyz";
+    std::string dir = std::filesystem::temp_directory_path().string();
+    std::string good = dir + "/diag_test_good.cpp", broken = dir + "/diag_test_bad.cpp";
+    { std::ofstream(good) << "#include <cstdio>\nint main() { std::puts(\"ok\"); return 0; }\n"; }
+    { std::ofstream(broken) << "int main() {\n  int x = ;\n  return 0;\n}\n"; }
+    SyntaxCheckResult missing = runSyntaxCheck(good, bad);
+    CHECK(!missing.ran && !missing.compilerFound && !missing.message.empty());
+    SyntaxCheckResult ok = runSyntaxCheck(good);
+    if (ok.compilerFound) {                                   // g++ may be absent on a test machine
+        CHECK(ok.ran && ok.exitCode == 0 && countSeverity(ok.diagnostics, Severity::Error) == 0);
+        SyntaxCheckResult bd = runSyntaxCheck(broken);
+        CHECK(bd.ran && bd.exitCode != 0 && countSeverity(bd.diagnostics, Severity::Error) >= 1);
+        bool onLine2 = false;
+        for (size_t i = 0; i < bd.diagnostics.size(); ++i)
+            if (bd.diagnostics[i].severity == Severity::Error && bd.diagnostics[i].line == 2) onLine2 = true;
+        CHECK(onLine2);
+    } else {
+        std::cout << "  (g++ not installed: compiler run skipped)\n";
+    }
+    SyntaxCheckResult nofile = runSyntaxCheck(dir + "/diag_test_does_not_exist.cpp");
+    if (nofile.compilerFound) CHECK(nofile.ran && countSeverity(nofile.diagnostics, Severity::Error) >= 1);
+    std::remove(good.c_str());
+    std::remove(broken.c_str());
+}
+
 int main() {
     testDynArray();
     testStack();
@@ -2685,6 +2799,9 @@ int main() {
     testSnippetFiles();
     testApplySnippet();
     testSnippetRandomEditing();
+    testDiagParse();
+    testDiagBracketsAndSquiggle();
+    testDiagSyntaxCheck();
 
     std::cout << "\n" << (g_checks - g_failed) << "/" << g_checks << " checks passed";
     if (g_failed) std::cout << "  (" << g_failed << " FAILED)";

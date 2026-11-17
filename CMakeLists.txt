@@ -17,6 +17,7 @@ endif()
 add_library(engine STATIC
   engine/Assist.cpp
   engine/Brackets.cpp
+  engine/Diagnostics.cpp
   engine/Document.cpp
   engine/EditOps.cpp
   engine/Editor.cpp

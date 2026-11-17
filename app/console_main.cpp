@@ -3,11 +3,14 @@
 
 #include <cerrno>
 #include <cstdlib>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <string>
 
 #include "Assist.h"
 #include "Brackets.h"
+#include "Diagnostics.h"
 #include "DynArray.h"
 #include "Document.h"
 #include "Editor.h"
@@ -51,6 +54,7 @@ static void printHelp() {
         "      Put text in \"double quotes\" if it has spaces or is empty (\"\"); inside quotes\n"
         "      \\n is a line break, \\t a tab, \\\" a quote, \\\\ a backslash.\n"
         "  Code help (phase 4):\n"
+        "    check                       compiler check (g++ -fsyntax-only) + brackets: every error / warning with line:column\n"
         "    brackets                    check ( ) [ ] { } in the document (ignores strings and comments)\n"
         "    match <line> <col>          show the partner of the bracket at / just before a position\n"
         "    complete <prefix>           suggest words (C++ keywords + words in this document)\n"
@@ -271,6 +275,49 @@ static void snippetCommand(SnippetTable& sn, const std::string& args) {
     }
 }
 
+// check: brackets (instant) + the compiler's syntax check, one list like the GUI's Problems tab.
+static void checkCommand(const Document& doc) {
+    DynArray<Diagnostic> all = fromBrackets(checkBrackets(doc));
+    std::string note;
+    // The compiler needs a file: a temporary copy of what is on screen, so unsaved edits are checked too.
+    std::string ext = ".cpp";
+    if (!doc.path().empty()) {
+        std::string p = doc.path();
+        size_t dot = p.find_last_of('.');
+        if (dot != std::string::npos && isCompilableSource(p)) ext = p.substr(dot);
+        else if (!isCompilableSource(p)) note = "(file is not C/C++: compiler check skipped)";
+    }
+    if (note.empty()) {
+        std::error_code ec;
+        std::filesystem::path tmp = std::filesystem::temp_directory_path(ec) / ("console_check_tmp" + ext);
+        if (ec) {
+            note = "(no temporary folder: compiler check skipped)";
+        } else {
+            std::ofstream out(tmp.string().c_str(), std::ios::binary | std::ios::trunc);
+            out << doc.toString();
+            out.close();
+            SyntaxCheckOptions opt;
+            if (!doc.path().empty()) opt.includeDir = std::filesystem::path(doc.path()).parent_path().string();
+            SyntaxCheckResult r = runSyntaxCheck(tmp.string(), opt);
+            std::filesystem::remove(tmp, ec);
+            if (!r.ran) note = "(compiler check skipped: " + r.message + ")";
+            else for (size_t i = 0; i < r.diagnostics.size(); ++i) all.push_back(r.diagnostics[i]);
+        }
+    }
+    const size_t e = countSeverity(all, Severity::Error), w = countSeverity(all, Severity::Warning);
+    if (all.empty()) std::cout << "No problems found.";
+    else std::cout << e << " error(s), " << w << " warning(s):\n";
+    for (size_t i = 0; i < all.size(); ++i) {
+        const Diagnostic& d = all[i];
+        if (d.severity == Severity::Note) continue;
+        std::cout << "  ";
+        if (d.line) std::cout << d.line << ":" << (d.col ? d.col : 1) << "  "; else std::cout << "-    ";
+        std::cout << severityName(d.severity) << " [" << d.source << "]  " << d.message << "\n";
+    }
+    if (!note.empty()) std::cout << (all.empty() ? " " : "") << note << "\n";
+    else if (all.empty()) std::cout << "\n";
+}
+
 static bool execute(Editor& ed, Autocomplete& ac, SnippetTable& sn, const std::string& input) {
     const Document& doc = ed.doc();
     DynArray<std::string> w;
@@ -449,6 +496,9 @@ static bool execute(Editor& ed, Autocomplete& ac, SnippetTable& sn, const std::s
         std::cout << "; can redo " << ed.redoCount() << " step(s)";
         if (ed.canRedo()) std::cout << " (next: " << ed.nextRedoLabel() << ")";
         std::cout << ". History keeps the latest " << ed.historyLimit() << " steps.\n";
+    } else if (cmd == "check" || cmd == "problems") {
+        if (!rest.empty()) throw std::invalid_argument("Usage: check");
+        checkCommand(doc);
     } else if (cmd == "brackets") {
         BracketReport r = checkBrackets(doc);
         if (r.ok()) {
