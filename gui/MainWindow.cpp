@@ -30,6 +30,7 @@
 #include <QStatusBar>
 #include <QTabBar>
 #include <QTabWidget>
+#include <QTimer>
 #include <QToolBar>
 #include <QToolButton>
 #include <QUrl>
@@ -47,6 +48,9 @@
 #include "SettingsDialog.h"
 #include "ShortcutsDialog.h"
 #include "TerminalPanel.h"
+#include "ProblemsPanel.h"
+#include "SnippetDialog.h"
+#include "SyntaxChecker.h"
 #include "Runner.h"
 #include <QStandardPaths>
 #include "FileIO.h"
@@ -122,19 +126,44 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     centralStack_->addWidget(welcome_);
     centralStack_->addWidget(editorArea_);
 
-    // terminal under the editor, with a splitter to drag it taller or shorter
+    // Problems and Terminal under the editor (one tab strip), with a splitter to drag it taller or shorter
     terminal_ = new TerminalPanel(this);
     connect(terminal_, &TerminalPanel::hideRequested, this, [this]() { showTerminal(false); });
+    problems_ = new ProblemsPanel(this);
+    connect(problems_, &ProblemsPanel::hideRequested, this, [this]() { showProblems(false); });
+    connect(problems_, &ProblemsPanel::jumpRequested, this, &MainWindow::jumpToProblem);
+    connect(problems_, &ProblemsPanel::countsChanged, this, [this](int e, int w) {
+        bottom_->setTabText(0, e + w == 0 ? QString("Problems") : QString("Problems (%1)").arg(e + w));
+        if (!issueBtn_) return;
+        const bool clean = e + w == 0;
+        issueBtn_->setText(clean ? QString("No problems")
+                                 : QString("%1 error%2, %3 warning%4").arg(e).arg(e == 1 ? "" : "s").arg(w).arg(w == 1 ? "" : "s"));
+        issueBtn_->setIcon(clean ? Icons::get(Icons::Check, QColor(0x73, 0xc9, 0x91), QColor(0x73, 0xc9, 0x91))
+                                 : Icons::get(Icons::Warning, QColor(0xe2, 0xb7, 0x14), QColor(0xe2, 0xb7, 0x14)));
+        issueBtn_->setToolTip(clean ? QString() : QString("Show the Problems panel"));
+    });
+    bottom_ = new QTabWidget(this);
+    bottom_->setDocumentMode(true);
+    bottom_->addTab(problems_, "Problems");
+    bottom_->addTab(terminal_, "Terminal");
+    connect(bottom_, &QTabWidget::currentChanged, this, [this]() { syncBottomActions(); });
     split_ = new QSplitter(Qt::Vertical, this);
     split_->setHandleWidth(5);
     split_->setChildrenCollapsible(false);
     split_->addWidget(centralStack_);
-    split_->addWidget(terminal_);
+    split_->addWidget(bottom_);
     split_->setStretchFactor(0, 1);
     split_->setStretchFactor(1, 0);
-    terminal_->hide();
-    connect(split_, &QSplitter::splitterMoved, this, [this]() { if (terminal_->isVisible()) terminalHeight_ = terminal_->height(); });
+    bottom_->hide();
+    connect(split_, &QSplitter::splitterMoved, this, [this]() { if (bottom_->isVisible()) terminalHeight_ = bottom_->height(); });
     setCentralWidget(split_);
+
+    // compiler check in the background: g++ -fsyntax-only on a copy of the current text
+    checker_ = new SyntaxChecker(this);
+    connect(checker_, &SyntaxChecker::finished, this, &MainWindow::onCheckFinished);
+    checkTimer_ = new QTimer(this);
+    checkTimer_->setSingleShot(true);
+    connect(checkTimer_, &QTimer::timeout, this, &MainWindow::checkNow);
 
     // sidebar: file manager
     explorer_ = new FileExplorer(this);
@@ -163,14 +192,15 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     posLabel_ = new QLabel("Ln 1, Col 1");
     langLabel_ = new QLabel();
     eolLabel_ = new QLabel("LF");
-    issueBtn_ = new QPushButton("Brackets OK");
+    issueBtn_ = new QPushButton("No problems");
     issueBtn_->setIcon(Icons::get(Icons::Check, QColor(0x73, 0xc9, 0x91), QColor(0x73, 0xc9, 0x91)));
     issueBtn_->setFlat(true);
     issueBtn_->setCursor(Qt::PointingHandCursor);
     connect(issueBtn_, &QPushButton::clicked, this, [this]() {
         CodeView* v = currentView();
         Pos p;
-        if (v && v->firstBracketIssuePos(p)) { v->setCursor(p); v->setFocus(); }
+        if (v && v->firstBracketIssuePos(p)) v->setCursor(p);
+        showProblems(true);
     });
     statusBar()->addPermanentWidget(issueBtn_);
     statusBar()->addPermanentWidget(posLabel_);
@@ -244,25 +274,131 @@ bool MainWindow::runCurrent() {
 
 void MainWindow::stopRun() { if (terminal_) terminal_->stop(); }
 
-bool MainWindow::terminalVisible() const { return terminal_ && !terminal_->isHidden(); }
+bool MainWindow::bottomVisible() const { return bottom_ && !bottom_->isHidden(); }
+bool MainWindow::terminalVisible() const { return bottomVisible() && bottom_->currentWidget() == terminal_; }
+bool MainWindow::problemsVisible() const { return bottomVisible() && bottom_->currentWidget() == problems_; }
 
-void MainWindow::showTerminal(bool show) {
-    if (show == terminalVisible()) { if (show) terminal_->focusInput(); return; }
-    if (show) {
-        terminal_->show();
+// Show the bottom panel with 'page' (Problems or Terminal) in front.
+void MainWindow::showBottom(QWidget* page) {
+    const bool wasHidden = !bottomVisible();
+    bottom_->setCurrentWidget(page);
+    if (wasHidden) {
+        bottom_->show();
         const int total = split_->height();
         const int h = std::max(120, std::min(terminalHeight_, total / 2));
         split_->setSizes({std::max(1, total - h), h});
-        terminal_->focusInput();
-    } else {
-        terminalHeight_ = std::max(120, terminal_->height());
-        terminal_->hide();
-        if (CodeView* v = currentView()) v->setFocus();
     }
+    syncBottomActions();
+}
+
+void MainWindow::hideBottom() {
+    if (!bottomVisible()) return;
+    terminalHeight_ = std::max(120, bottom_->height());
+    bottom_->hide();
+    if (CodeView* v = currentView()) v->setFocus();
+    syncBottomActions();
+}
+
+void MainWindow::syncBottomActions() {
     if (terminalAct_) {
         QSignalBlocker b(terminalAct_);
-        terminalAct_->setChecked(show);
+        terminalAct_->setChecked(terminalVisible());
     }
+    if (problemsAct_) {
+        QSignalBlocker b(problemsAct_);
+        problemsAct_->setChecked(problemsVisible());
+    }
+}
+
+void MainWindow::showTerminal(bool show) {
+    if (show) {
+        if (!terminalVisible()) showBottom(terminal_);
+        terminal_->focusInput();
+    } else if (terminalVisible()) {
+        hideBottom();
+    }
+}
+
+void MainWindow::showProblems(bool show) {
+    if (show) {
+        if (!problemsVisible()) showBottom(problems_);
+    } else if (problemsVisible()) {
+        hideBottom();
+    }
+}
+
+// ---------------------------------------------------------------- problems: compiler check + list
+
+// Check the current file with the compiler a moment after the last edit / tab change.
+void MainWindow::scheduleCheck(int delayMs) {
+    if (!liveCheck_) return;
+    CodeView* v = currentView();
+    if (!v) return;
+    const std::string path = v->editor().doc().path();
+    if (path.empty() || !isCompilableSource(path)) return;      // brackets are still checked live
+    checkTimer_->start(delayMs);
+}
+
+void MainWindow::checkNow() {
+    CodeView* v = currentView();
+    if (!v) return;
+    const std::string path = v->editor().doc().path();
+    if (path.empty() || !isCompilableSource(path)) {
+        problems_->setStatus(path.empty() ? "Save the file as .cpp or .c to check it with the compiler (brackets are checked already)."
+                                          : "The compiler check is for C / C++ files (brackets are checked already).");
+        return;
+    }
+    checkView_ = v;
+    checkRevision_ = v->revision();
+    problems_->setStatus("Checking…");
+    checker_->check(QString::fromStdString(path), v->editor().doc().toString(), ++checkToken_);
+}
+
+void MainWindow::onCheckFinished(const QString&, quint64 token, const std::vector<Diagnostic>& diags, const QString& message) {
+    if (token != checkToken_) return;
+    CodeView* v = checkView_;
+    if (!v) return;
+    if (!message.isEmpty()) { problems_->setStatus(message); return; }
+    if (v->revision() != checkRevision_) {                      // edited meanwhile: the result is out of date
+        if (liveCheck_) scheduleCheck(200); else problems_->setStatus(QString());
+        return;
+    }
+    v->setCompilerDiagnostics(diags);
+    problems_->setStatus(QString());
+}
+
+void MainWindow::refreshProblems() {
+    CodeView* v = currentView();
+    if (!v) {
+        problems_->setProblems({}, QString());
+        problems_->setStatus(QString());
+        return;
+    }
+    QString name = QString::fromStdString(v->editor().doc().path());
+    if (name.isEmpty()) name = v->property("untitledName").toString();
+    problems_->setProblems(v->diagnostics(), name);
+}
+
+// A row of the Problems list was clicked: open the file (if it is another one) and go there.
+void MainWindow::jumpToProblem(const QString& file, int line, int col) {
+    CodeView* v = currentView();
+    if (!v) return;
+    const QString own = QString::fromStdString(v->editor().doc().path());
+    bool same = file.isEmpty() || file == own || file == v->property("untitledName").toString();
+    if (!same && !own.isEmpty()) {
+        QFileInfo target(file);
+        if (target.isRelative()) target = QFileInfo(QDir(QFileInfo(own).absolutePath()).filePath(file));
+        if (target.isFile() && target == QFileInfo(own)) same = true;
+        else if (target.isFile() && openPath(target.absoluteFilePath())) { v = currentView(); same = (v != nullptr); }
+    }
+    if (!same || !v) return;
+    if (line > 0) v->setCursor(Pos{static_cast<size_t>(line - 1), static_cast<size_t>(col > 0 ? col - 1 : 0)});
+    v->setFocus();
+}
+
+void MainWindow::editSnippets() {
+    SnippetDialog dlg(this);
+    dlg.exec();
 }
 
 // Slim bar on the far left with the main places, like other modern editors.
@@ -321,6 +457,7 @@ void MainWindow::updateCentral() {
         welcome_->setRecent(recentFiles(), recentFolders());
         welcome_->setFolderOpen(!root_.isEmpty());
         refreshTitle();
+        if (problems_) refreshProblems();
     }
 }
 
@@ -405,6 +542,8 @@ void MainWindow::buildActions() {
     add(lines, "Outdent", seq("Ctrl+["), onView(&CodeView::outdentSelection));
     add(edit, "Toggle Line Comment", seq("Ctrl+/"), onView(&CodeView::toggleComment));
     add(edit, "Trigger Autocomplete", seq("Ctrl+Space"), onView(&CodeView::triggerAutocomplete));
+    add(edit, "Expand Snippet", seq("Ctrl+J"), onView(&CodeView::expandSnippet));
+    add(edit, "Snippets…", {}, [this]() { editSnippets(); });
 
     QMenu* search = menuBar()->addMenu("&Search");
     add(search, "Find…", {QKeySequence::Find}, [this]() { showFind(false); });
@@ -418,6 +557,22 @@ void MainWindow::buildActions() {
     QMenu* run = menuBar()->addMenu("&Run");
     runAct_ = add(run, "Run File", {QKeySequence(QStringLiteral("F5"))}, [this]() { runCurrent(); });
     add(run, "Stop", {QKeySequence(QStringLiteral("Shift+F5"))}, [this]() { stopRun(); });
+    run->addSeparator();
+    add(run, "Check for Errors", seq("F7"), [this]() { showProblems(true); checkNow(); });
+    liveCheck_ = QSettings().value("liveCheck", true).toBool();
+    QAction* liveAct = run->addAction("Check Code While Typing");
+    liveAct->setCheckable(true);
+    liveAct->setChecked(liveCheck_);
+    addAction(liveAct);
+    connect(liveAct, &QAction::toggled, this, [this](bool on) {
+        liveCheck_ = on;
+        QSettings().setValue("liveCheck", on);
+        if (on) { scheduleCheck(200); return; }
+        checkTimer_->stop();
+        checker_->cancel();
+        if (CodeView* v = currentView()) v->clearCompilerDiagnostics();
+        problems_->setStatus(QString());
+    });
 
     QMenu* view = menuBar()->addMenu("&View");
     add(view, "Next Tab", {QKeySequence(QStringLiteral("Ctrl+Tab")), QKeySequence(QStringLiteral("Ctrl+PgDown"))}, [this]() { nextTab(+1); });
@@ -433,6 +588,8 @@ void MainWindow::buildActions() {
     }
     view->addSeparator();
     add(view, "Toggle Terminal", seq("Ctrl+`"), [this]() { showTerminal(!terminalVisible()); });
+    problemsAct_ = add(view, "Toggle Problems", seq("Ctrl+Shift+M"), [this]() { showProblems(!problemsVisible()); });
+    problemsAct_->setCheckable(true);
     QAction* side = dock_->toggleViewAction();
     side->setText("Toggle Sidebar");
     side->setShortcut(QKeySequence(QStringLiteral("Ctrl+B")));
@@ -645,7 +802,10 @@ void MainWindow::connectView(CodeView* v) {
     connect(v, &CodeView::stateChanged, this, &MainWindow::onViewStateChanged);
     connect(v, &CodeView::textEdited, this, [this, v]() {
         if (v == currentView() && findBar_->isVisible()) highlightAll();
+        if (v == currentView()) scheduleCheck();
     });
+    connect(v, &CodeView::diagnosticsChanged, this, [this, v]() { if (v == currentView()) refreshProblems(); });
+    connect(v, &CodeView::statusMessage, this, [this](const QString& m) { if (!m.isEmpty()) statusBar()->showMessage(m, 4000); });
 }
 
 CodeView* MainWindow::newTab(const QString& path) {
@@ -740,6 +900,8 @@ void MainWindow::onTabChanged(int) {
     refreshTitle();
     onViewStateChanged();
     if (findBar_->isVisible()) highlightAll();
+    refreshProblems();
+    scheduleCheck(400);
     v->setFocus();
 }
 
@@ -755,13 +917,6 @@ void MainWindow::onViewStateChanged() {
     posLabel_->setText(pos);
     langLabel_->setText(v->languageName());
     eolLabel_->setText(v->editor().doc().crlf() ? "CRLF" : "LF");
-    if (v->bracketsReady()) {
-        const size_t n = v->bracketIssueCount();
-        issueBtn_->setText(n == 0 ? QString("Brackets OK") : QString("%1 bracket issue%2").arg(n).arg(n == 1 ? "" : "s"));
-        issueBtn_->setIcon(n == 0 ? Icons::get(Icons::Check, QColor(0x73, 0xc9, 0x91), QColor(0x73, 0xc9, 0x91))
-                                  : Icons::get(Icons::Warning, QColor(0xe2, 0xb7, 0x14), QColor(0xe2, 0xb7, 0x14)));
-        issueBtn_->setToolTip(n == 0 ? QString() : v->firstBracketIssue());
-    }
 }
 
 void MainWindow::nextTab(int step) {
@@ -814,6 +969,7 @@ bool MainWindow::saveView(CodeView* v, bool forceDialog) {
     refreshTitle();
     statusBar()->showMessage("Saved " + QDir::toNativeSeparators(path), 3000);
     addRecent("recentFiles", path);
+    if (v == currentView()) scheduleCheck(200);                 // a new name / extension may now be checkable
     return true;
 }
 
@@ -1040,7 +1196,8 @@ void MainWindow::closeEvent(QCloseEvent* e) {
     s.setValue("sidebar", dock_->isVisible());
     s.setValue("geometry", saveGeometry());
     s.setValue("terminal", terminalVisible());
-    s.setValue("terminalHeight", terminalVisible() ? terminal_->height() : terminalHeight_);
+    s.setValue("problems", problemsVisible());
+    s.setValue("terminalHeight", bottomVisible() ? bottom_->height() : terminalHeight_);
     e->accept();
 }
 
@@ -1057,4 +1214,5 @@ void MainWindow::restoreSession() {
     const QString cur = s.value("current").toString();
     if (!cur.isEmpty()) { const int i = indexOfPath(cur); if (i >= 0) tabs_->setCurrentIndex(i); }
     if (s.value("terminal", false).toBool()) showTerminal(true);
+    else if (s.value("problems", false).toBool()) showProblems(true);
 }

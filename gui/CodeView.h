@@ -13,6 +13,7 @@
 #include <vector>
 #include "Assist.h"
 #include "Brackets.h"
+#include "Diagnostics.h"
 #include "EditOps.h"
 #include "Editor.h"
 #include "Settings.h"
@@ -56,6 +57,18 @@ public:
     bool bracketsReady() const { return !dirtyBrackets_; }
     bool firstBracketIssuePos(Pos& where) const;
 
+    // ---- problems: red (error) and yellow (warning) squiggles ----
+    // The compiler's results for THIS file (line / column are 1-based). Squiggles for bracket
+    // problems come from the live bracket checker and need no call. Edits move or drop the
+    // compiler's marks until the next check replaces them.
+    void setCompilerDiagnostics(const std::vector<Diagnostic>& list);
+    void clearCompilerDiagnostics() { setCompilerDiagnostics({}); }
+    std::vector<Diagnostic> diagnostics() const;       // brackets + compiler, for the Problems tab
+    unsigned revision() const { return revision_; }    // grows with every text change
+
+    // ---- snippets (engine hash table, shared by all tabs: SnippetStore) ----
+    bool snippetAtCursor() const;                      // the word before the cursor is a snippet trigger
+
     int zoom() const { return zoom_; }
     void setZoom(int points);
 
@@ -78,11 +91,14 @@ public slots:
     void newLineBelow();
     void newLineAbove();
     void triggerAutocomplete();
+    void expandSnippet();                // Edit > Expand Snippet (Tab does the same)
     void goToLine(int line1);            // 1-based, clamped
 
 signals:
     void stateChanged();                 // cursor, selection, text, modified flag or report changed
     void textEdited();                   // the text changed
+    void diagnosticsChanged();           // the list behind diagnostics() changed
+    void statusMessage(const QString&);  // something short for the status bar
 
 protected:
     void paintEvent(QPaintEvent*) override;
@@ -95,6 +111,7 @@ protected:
     void resizeEvent(QResizeEvent*) override;
     void focusInEvent(QFocusEvent*) override;
     void focusOutEvent(QFocusEvent*) override;
+    bool viewportEvent(QEvent*) override;            // tooltips on squiggles
     void inputMethodEvent(QInputMethodEvent*) override;
     QVariant inputMethodQuery(Qt::InputMethodQuery) const override;
     bool focusNextPrevChild(bool) override { return false; }   // Tab belongs to the editor
@@ -125,6 +142,11 @@ private:
     size_t blockValid_ = 0;              // blockAtStart_[0 .. blockValid_) are up to date
     QListWidget* popup_ = nullptr;
     bool lastModified_ = false;
+    std::vector<Diagnostic> compilerDiags_;   // last compiler check of this file (errors and warnings)
+    std::vector<Diagnostic> bracketDiags_;    // the bracket report as diagnostics (1-based)
+    size_t lastLineCount_ = 1;                // to move compiler marks when lines are added / removed
+    unsigned revision_ = 0;
+    QString snippetMsg_;
 
     // the user's preferences (Settings window): font, tabs, cursor, what is drawn
     void applySettings();
@@ -169,6 +191,12 @@ private:
     void tokenize(const QString& s, bool& inBlock, std::vector<Span>& out) const;
     void ensureBlockState(size_t upToLine);
     void recomputeBrackets();
+
+    // squiggles
+    struct Squig { size_t line; size_t col; size_t len; int sev; QString text; };   // sev 0 error, 1 warning
+    void collectSquiggles(size_t fromLine, size_t toLine, std::vector<Squig>& out) const;
+    void shiftDiagnostics(size_t fromLine, size_t newLineCount);
+    bool tryExpandSnippet();
 
     // autocomplete popup
     void showCompletions(bool force = false);

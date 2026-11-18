@@ -11,7 +11,8 @@ The GUI (DevPad, Qt Widgets) is a thin layer on top; all editing logic lives in 
 | **2** | Command records + Undo/Redo (two stacks), grouped edits, replace-range | **done** |
 | **3** | KMP search (find all, locations), replace one / replace all, whole-word / ignore-case | **done** |
 | **4a** | Bracket checker (stack), Trie autocomplete | **done** |
-| 4b | Hash-table snippets | next part (draft files in `next_part_snippets/`, not built yet) |
+| **4b** | Hash-table snippets (`engine/HashTable.h`, `Snippets.*`), console + GUI | **done** |
+| **4c** | Diagnostics: compiler (`g++ -fsyntax-only`) + bracket errors in one list; red / yellow squiggles, Problems tab, console `check` | **done** |
 | **5** | **DevPad**: Qt Widgets GUI built with CMake - multi-tab editing, line move / copy, auto-pairs and wrapping selections in `() [] {} "" ''`, Ctrl+Tab, Quick Open, rename file, find / replace, file tree | **done** |
 | 6 | Report, complexity table, screenshots | |
 
@@ -67,6 +68,11 @@ gui/Settings.h/cpp      the user's preferences (QSettings), one signal when anyt
 gui/SettingsDialog.*    Settings window (Ctrl+,), gui/Controls.* its switches, steppers, swatches
 gui/ShortcutsDialog.*   Keyboard Shortcuts window (F1): searchable key-cap cards
 gui/TerminalPanel.*     built-in terminal under the editor (Ctrl+`)
+gui/ProblemsPanel.*     Problems tab next to the terminal (Ctrl+Shift+M): errors / warnings, click to jump
+gui/SyntaxChecker.*     runs g++ -fsyntax-only on a copy of the text in the background (QProcess)
+gui/SnippetStore.*      the shared snippet table + snippets.txt in the app config folder; gui/SnippetDialog.* the Snippets window
+engine/Diagnostics.*    compiler-output parser, bracket issues as diagnostics, squiggle length, syntax-check runner
+engine/HashTable.h, Snippets.*  snippet hash table (chaining), `$0` cursor marker, save / load
 gui/Runner.h/cpp        what F5 runs for each file type
 gui/Theme.h/cpp         the dark theme: palette, style sheet, UI and code fonts (one place for every colour)
 gui/Icons.h/cpp         all icons, drawn in code: line icons, file-type badges, folders, the app icon
@@ -346,4 +352,21 @@ Space: O(N) for text, plus two pointers and one array header per line.
 ## Console commands
 
 Type `help` inside the editor. Lines and columns start at 1.
-`new open save saveas show info append addline ins nl del delword delrange dellines replace find replaceall replacenth undo redo history brackets match complete accept dictadd dictdel quit`
+`new open save saveas show info append addline ins nl del delword delrange dellines replace find replaceall replacenth undo redo history brackets match complete accept dictadd dictdel expand snippet check quit`
+
+## Snippets, error checking and the Problems tab (phase 4b / 4c)
+
+- **Snippets** live in our own chained hash table. `$0` in a body marks where the cursor lands, `$$` is a real
+  dollar sign, and every line after the first gets the indentation of the line you expanded on. Console:
+  `expand [line col]`, `snippet list|show|add|del|load|save|defaults|stats`. GUI: type the trigger and press
+  `Tab` (or `Ctrl+J`, Edit > Expand Snippet); Edit > Snippets... adds, edits, removes, imports and exports them.
+  The GUI keeps the list in `snippets.txt` in the app config folder.
+- **Error checking** has two sources: the instant bracket checker (while typing) and the compiler
+  (`g++ -fsyntax-only` on a temporary copy of the text, about 1 s after you stop typing, so unsaved edits are
+  checked and the file is never touched). Both feed one list of `Diagnostic` (file, line, column, severity,
+  message). Errors get a red wavy underline and a red dot in the line-number gutter, warnings a yellow one;
+  hover the underline for the message.
+- **Problems tab** (`Ctrl+Shift+M`, or click the status-bar counter) sits beside Terminal; click a row to jump to
+  the line. `F7` checks now; Run > Check Code While Typing turns the background check off. The compiler check
+  needs `g++` (or `gcc` for `.c`) on PATH; without it the brackets are still checked and the panel says so.
+- Console `check` prints the same list (brackets + compiler) with `line:col`.

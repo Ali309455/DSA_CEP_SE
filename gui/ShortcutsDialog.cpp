@@ -27,12 +27,14 @@ const QList<ShortcutsDialog::Entry>& ShortcutsDialog::entries() {
         {"Files and windows", "Rename file", {"F2"}},
         {"Files and windows", "Show / hide sidebar", {"Ctrl+B"}},
         {"Files and windows", "Show / hide terminal", {"Ctrl+`"}},
+        {"Files and windows", "Show / hide Problems", {"Ctrl+Shift+M"}},
         {"Files and windows", "Settings", {"Ctrl+,"}},
         {"Files and windows", "Keyboard shortcuts", {"F1"}},
         {"Files and windows", "Quit", {"Ctrl+Q"}},
 
         {"Run", "Save, build and run the current file in the terminal", {"F5"}},
         {"Run", "Stop the running program", {"Shift+F5"}},
+        {"Run", "Check the file for errors (compiler)", {"F7"}},
 
         {"Lines", "Move line(s) up", {"Alt+Up"}},
         {"Lines", "Move line(s) down", {"Alt+Down"}},
@@ -53,6 +55,7 @@ const QList<ShortcutsDialog::Entry>& ShortcutsDialog::entries() {
         {"Editing", "Paste", {"Ctrl+V"}},
         {"Editing", "Select all", {"Ctrl+A"}},
         {"Editing", "Autocomplete", {"Ctrl+Space"}},
+        {"Editing", "Expand snippet (type the trigger, e.g. for)", {"Tab", "Ctrl+J"}},
         {"Editing", "Zoom in", {"Ctrl+="}},
         {"Editing", "Zoom out", {"Ctrl+-"}},
         {"Editing", "Reset zoom", {"Ctrl+0"}},

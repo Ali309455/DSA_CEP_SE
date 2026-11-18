@@ -8,6 +8,7 @@
 #include <QPointer>
 #include <QString>
 #include <vector>
+#include "Diagnostics.h"
 #include "Search.h"
 
 class CodeView;
@@ -23,6 +24,9 @@ class WelcomePage;
 class QStackedWidget;
 class QSplitter;
 class TerminalPanel;
+class ProblemsPanel;
+class SyntaxChecker;
+class QTimer;
 class SettingsDialog;
 class ShortcutsDialog;
 
@@ -57,10 +61,15 @@ public:
     QStringList recentFiles() const;
     QStringList recentFolders() const;
 
-    // terminal panel, settings window, shortcuts window
+    // terminal panel, problems panel (one tab strip under the editor), settings window, shortcuts window
     TerminalPanel* terminal() const { return terminal_; }
     void showTerminal(bool show);
     bool terminalVisible() const;
+    ProblemsPanel* problems() const { return problems_; }
+    void showProblems(bool show);
+    bool problemsVisible() const;
+    void checkNow();                                       // run the compiler's syntax check on the current file
+    void editSnippets();                                   // the Snippets window
     SettingsDialog* showSettings(const QString& section = QString());
     ShortcutsDialog* showShortcuts();
     bool runCurrent();                                     // F5: save, build if needed, run in the terminal
@@ -97,8 +106,17 @@ private:
     WelcomePage* welcome_ = nullptr;
     QStackedWidget* centralStack_ = nullptr;               // welcome page or the editor (tabs + find bar)
     QWidget* editorArea_ = nullptr;
-    QSplitter* split_ = nullptr;                           // editor above, terminal below
+    QSplitter* split_ = nullptr;                           // editor above, Problems | Terminal below
+    QTabWidget* bottom_ = nullptr;
     TerminalPanel* terminal_ = nullptr;
+    ProblemsPanel* problems_ = nullptr;
+    SyntaxChecker* checker_ = nullptr;
+    QTimer* checkTimer_ = nullptr;
+    QAction* problemsAct_ = nullptr;
+    QPointer<CodeView> checkView_;                         // the tab the running check belongs to
+    unsigned checkRevision_ = 0;                           // its text version when the check started
+    quint64 checkToken_ = 0;
+    bool liveCheck_ = true;                                // Run > Check Code While Typing
     QAction* terminalAct_ = nullptr;
     QAction* runAct_ = nullptr;
     QPointer<SettingsDialog> settings_;
@@ -119,6 +137,15 @@ private:
     QString root_;
     bool rootChosen_ = false;
     int untitled_ = 0;
+
+    bool bottomVisible() const;
+    void showBottom(QWidget* page);
+    void hideBottom();
+    void syncBottomActions();
+    void scheduleCheck(int delayMs = 900);
+    void refreshProblems();
+    void jumpToProblem(const QString& file, int line, int col);
+    void onCheckFinished(const QString& path, quint64 token, const std::vector<Diagnostic>& diags, const QString& message);
 
     void buildActions();
     void buildActivityBar();

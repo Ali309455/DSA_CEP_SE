@@ -32,6 +32,10 @@
 #include "SettingsDialog.h"
 #include "ShortcutsDialog.h"
 #include "TerminalPanel.h"
+#include "ProblemsPanel.h"
+#include "SnippetDialog.h"
+#include "SnippetStore.h"
+#include "SyntaxChecker.h"
 #include "Theme.h"
 
 static int g_checks = 0, g_failed = 0;
@@ -1021,6 +1025,154 @@ static void testRun() {
     for (int i = w.tabCount() - 1; i >= 0; --i) w.closeTab(i, true);
 }
 
+// ---------------------------------------------------------------- snippets, problems, squiggles
+
+static void testSnippetsInEditor() {
+    std::cout << "[snippets: Tab expands the trigger]\n";
+    SnippetStore::instance().resetToDefaults();
+    CodeView v;
+    v.resize(600, 400);
+    v.show();
+    setText(&v, "");
+    type(&v, "for");
+    CHECK(v.snippetAtCursor());
+    key(&v, Qt::Key_Tab);                                    // "for" + Tab -> the for-loop
+    CHECK(txt(&v).contains("for ("));
+    const int lines = v.editor().doc().lineCount();
+    CHECK(lines > 1);
+    v.undo();                                                // one undo step puts "for" back
+    CHECK(!txt(&v).contains("for (") && txt(&v).startsWith("for"));
+
+    setText(&v, "");
+    type(&v, "zzqx");                                        // not a snippet: Tab is just indentation
+    CHECK(!v.snippetAtCursor());
+    key(&v, Qt::Key_Tab);
+    CHECK(txt(&v).startsWith("zzqx"));
+
+    // Edit > Expand Snippet does the same without the Tab key
+    setText(&v, "");
+    type(&v, "if");
+    v.expandSnippet();
+    CHECK(txt(&v).contains("if ("));
+
+    // the user's own snippet, through the shared store
+    SnippetStore::instance().table().add("mysnip", "hello $0 world");
+    setText(&v, "");
+    type(&v, "mysnip");
+    key(&v, Qt::Key_Tab);
+    CHECK_EQ(txt(&v), QString("hello  world\n"));
+    CHECK(v.cursor().line == 0 && v.cursor().col == 6);      // $0 marks the cursor
+    SnippetStore::instance().table().remove("mysnip");
+    SnippetStore::instance().resetToDefaults();
+
+    // the Snippets window lists the table
+    SnippetDialog d;
+    d.show();
+    CHECK(d.isVisible());
+    d.close();
+}
+
+static void testProblemsPanel() {
+    std::cout << "[Problems panel]\n";
+    ProblemsPanel p;
+    p.resize(600, 200);
+    p.show();
+    CHECK(p.rowCount() == 0 && p.errorCount() == 0);
+    std::vector<Diagnostic> list;
+    Diagnostic e; e.severity = Severity::Error; e.file = "a.cpp"; e.line = 5; e.col = 3; e.message = "boom"; e.source = "g++";
+    Diagnostic w; w.severity = Severity::Warning; w.file = "a.cpp"; w.line = 2; w.col = 1; w.message = "careful"; w.source = "g++";
+    Diagnostic n; n.severity = Severity::Note; n.file = "a.cpp"; n.line = 1; n.message = "declared here";
+    Diagnostic b; b.severity = Severity::Error; b.line = 9; b.col = 4; b.message = "bracket"; b.source = "brackets";
+    list = {e, w, n, b};
+    p.setProblems(list, "cur.cpp");
+    CHECK(p.rowCount() == 3 && p.errorCount() == 2 && p.warningCount() == 1);    // notes are not listed
+    QSignalSpy jump(&p, &ProblemsPanel::jumpRequested);
+    p.activateRow(0);                                        // sorted by file: "" (brackets) first
+    CHECK(jump.count() == 1);
+    CHECK(jump.at(0).at(0).toString() == "cur.cpp" && jump.at(0).at(1).toInt() == 9 && jump.at(0).at(2).toInt() == 4);
+    p.activateRow(1);                                        // a.cpp:2 (warning) before a.cpp:5
+    CHECK(jump.at(1).at(0).toString() == "a.cpp" && jump.at(1).at(1).toInt() == 2);
+    p.setProblems({}, "cur.cpp");
+    CHECK(p.rowCount() == 0);
+}
+
+static void testSquigglesAndMainWindow() {
+    std::cout << "[squiggles, Problems tab and the syntax check]\n";
+    AppSettings::instance().resetToDefaults();
+    QTemporaryDir tmp;
+    const QString root = QFileInfo(tmp.path()).canonicalFilePath();
+    const QString file = root + "/bad.cpp";
+    { QFile f(file); f.open(QIODevice::WriteOnly); f.write("int main() {\n  int x = ;\n  return 0;\n}\n"); }
+
+    // a compiler result handed to the view shows up in diagnostics() and survives a line shift
+    CodeView v;
+    v.resize(600, 300);
+    v.show();
+    setText(&v, "a\nb\nc\nd\n");
+    Diagnostic e; e.severity = Severity::Error; e.line = 3; e.col = 1; e.message = "x"; e.source = "g++";
+    Diagnostic w; w.severity = Severity::Warning; w.line = 4; w.col = 1; w.message = "y"; w.source = "g++";
+    Diagnostic note; note.severity = Severity::Note; note.line = 1; note.message = "z";
+    QSignalSpy changed(&v, &CodeView::diagnosticsChanged);
+    v.setCompilerDiagnostics({e, w, note});
+    CHECK(changed.count() == 1);
+    size_t nonBracket = 0;
+    for (const Diagnostic& d : v.diagnostics()) if (d.source == "g++") ++nonBracket;
+    CHECK(nonBracket == 2);                                  // notes are dropped
+    v.setCursor(Pos{0, 1});
+    key(&v, Qt::Key_Return);                                 // a line is inserted above: marks move down one line
+    bool movedErr = false;
+    for (const Diagnostic& d : v.diagnostics()) if (d.source == "g++" && d.severity == Severity::Error && d.line == 4) movedErr = true;
+    CHECK(movedErr);
+    v.clearCompilerDiagnostics();
+    CHECK(v.diagnostics().empty() || v.diagnostics()[0].source == "brackets");
+    v.grab();                                                // painting with marks must not crash
+    v.setCompilerDiagnostics({e, w});
+    v.grab();
+
+    // brackets show up as problems too, without any compiler
+    setText(&v, "int f( {\n");
+    QTest::qWait(500);
+    bool haveBracket = false;
+    for (const Diagnostic& d : v.diagnostics()) if (d.source == "brackets") haveBracket = true;
+    CHECK(haveBracket);
+
+    // main window: Problems tab beside the terminal, F7 runs the real compiler
+    MainWindow mw;
+    mw.show();
+    mw.openPath(file);
+    CHECK(!mw.problemsVisible());
+    mw.showProblems(true);
+    CHECK(mw.problemsVisible() && !mw.terminalVisible() && mw.problems()->isVisible());
+    mw.showTerminal(true);                                   // switching tabs, panel stays open
+    CHECK(mw.terminalVisible() && !mw.problemsVisible());
+    mw.showProblems(true);
+    mw.checkNow();
+    // the compiler runs in the background; g++ may be missing on a test machine
+    for (int i = 0; i < 60 && mw.problems()->errorCount() == 0; ++i) QTest::qWait(100);
+    const bool haveGpp = QStandardPaths::findExecutable("g++") != QString();
+    if (haveGpp) {
+        CHECK(mw.problems()->errorCount() >= 1);
+        bool onLine2 = false;
+        for (const Diagnostic& d : mw.currentView()->diagnostics()) if (d.source != "brackets" && d.line == 2) onLine2 = true;
+        CHECK(onLine2);
+        QSignalSpy none(mw.problems(), &ProblemsPanel::jumpRequested);
+        mw.problems()->activateRow(0);                       // clicking the row moves the cursor there
+        CHECK(mw.currentView()->cursor().line == 1);
+        // fix the file: the marks go away after the next check
+        mw.currentView()->editor().newDocument();
+        mw.currentView()->editor().insertText(Pos{0, 0}, "int main() { return 0; }\n");
+        mw.currentView()->notifyEdited(0);
+        mw.checkNow();
+        for (int i = 0; i < 60 && mw.problems()->errorCount() != 0; ++i) QTest::qWait(100);
+        CHECK(mw.problems()->errorCount() == 0);
+    } else {
+        std::cout << "  (g++ not installed: compiler run skipped)\n";
+    }
+    mw.showProblems(false);
+    CHECK(!mw.problemsVisible());
+    for (int i = mw.tabCount() - 1; i >= 0; --i) mw.closeTab(i, true);
+}
+
 int main(int argc, char** argv) {
     qputenv("QT_QPA_PLATFORM", qEnvironmentVariableIsSet("QT_QPA_PLATFORM") ? qgetenv("QT_QPA_PLATFORM") : QByteArray("offscreen"));
     QApplication app(argc, argv);
@@ -1043,6 +1195,9 @@ int main(int argc, char** argv) {
     testTerminal();
     testPanelsInMainWindow();
     testRun();
+    testSnippetsInEditor();
+    testProblemsPanel();
+    testSquigglesAndMainWindow();
     QSettings().clear();
     std::cout << (g_checks - g_failed) << "/" << g_checks << " GUI checks passed";
     if (g_failed) std::cout << "  (" << g_failed << " FAILED)";

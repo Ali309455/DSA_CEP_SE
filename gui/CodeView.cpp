@@ -6,7 +6,12 @@
 #include <QFileInfo>
 #include <QFontDatabase>
 #include <QFontMetrics>
+#include <QHelpEvent>
+#include <QPen>
+#include <QPolygon>
+#include <QToolTip>
 #include "Theme.h"
+#include "SnippetStore.h"
 #include <QGuiApplication>
 #include <QInputMethodEvent>
 #include <QKeyEvent>
@@ -278,6 +283,8 @@ bool CodeView::openFile(const QString& path, QString* error) {
     blockValid_ = 0;
     verticalScrollBar()->setValue(0);
     horizontalScrollBar()->setValue(0);
+    compilerDiags_.clear();
+    lastLineCount_ = ed_.doc().lineCount();
     edited(0);
     return true;
 }
@@ -366,7 +373,144 @@ bool CodeView::firstBracketIssuePos(Pos& where) const {
     return true;
 }
 
+// ---------------------------------------------------------------- problems (squiggles)
+
+void CodeView::setCompilerDiagnostics(const std::vector<Diagnostic>& list) {
+    compilerDiags_.clear();
+    for (const Diagnostic& d : list)
+        if (d.severity != Severity::Note) compilerDiags_.push_back(d);
+    std::stable_sort(compilerDiags_.begin(), compilerDiags_.end(), [](const Diagnostic& a, const Diagnostic& b) {
+        if (a.line != b.line) return a.line < b.line;
+        return a.col < b.col;
+    });
+    emit diagnosticsChanged();
+    viewport()->update();
+}
+
+std::vector<Diagnostic> CodeView::diagnostics() const {
+    std::vector<Diagnostic> out = bracketDiags_;
+    out.insert(out.end(), compilerDiags_.begin(), compilerDiags_.end());
+    return out;
+}
+
+// Lines were added or removed by an edit that started on 'fromLine': marks below it move with
+// the text, marks on the edited line are dropped (they are out of date). The next compiler
+// check replaces everything anyway; this only keeps the marks near the right place meanwhile.
+void CodeView::shiftDiagnostics(size_t fromLine, size_t newLineCount) {
+    const long delta = static_cast<long>(newLineCount) - static_cast<long>(lastLineCount_);
+    lastLineCount_ = newLineCount;
+    if (compilerDiags_.empty()) return;
+    const long from = static_cast<long>(fromLine);
+    std::vector<Diagnostic> keep;
+    keep.reserve(compilerDiags_.size());
+    for (const Diagnostic& d : compilerDiags_) {
+        if (d.line == 0 || (!d.file.empty() && d.file != ed_.doc().path())) { keep.push_back(d); continue; }   // not in this file: stays
+        const long l0 = static_cast<long>(d.line) - 1;
+        if (l0 < from) { keep.push_back(d); continue; }
+        if (l0 == from) continue;
+        const long moved = l0 + delta;
+        if (moved <= from || moved >= static_cast<long>(newLineCount)) continue;
+        Diagnostic m = d;
+        m.line = static_cast<size_t>(moved) + 1;
+        keep.push_back(m);
+    }
+    compilerDiags_.swap(keep);
+}
+
+// The squiggles that touch lines [fromLine, toLine). Brackets only while their report is current.
+void CodeView::collectSquiggles(size_t fromLine, size_t toLine, std::vector<Squig>& out) const {
+    const Document& doc = ed_.doc();
+    auto add = [&](const Diagnostic& d, int sev) {
+        if (d.line == 0 || out.size() > 3000) return;
+        const size_t l = d.line - 1;
+        if (l < fromLine || l >= toLine || l >= doc.lineCount()) return;
+        const std::string raw = lineText(l);
+        Squig s;
+        s.line = l;
+        s.col = std::min(d.col > 0 ? d.col - 1 : size_t(0), raw.size());
+        s.len = squiggleLength(raw, s.col);
+        s.sev = sev;
+        s.text = QString::fromStdString(d.message) + "  [" + QString::fromStdString(d.source) + "]";
+        out.push_back(s);
+    };
+    if (!dirtyBrackets_)
+        for (const Diagnostic& d : bracketDiags_) add(d, 0);
+    for (const Diagnostic& d : compilerDiags_) {
+        if (!d.file.empty() && d.file != doc.path()) continue;           // a problem in an included header: Problems tab only
+        add(d, d.severity == Severity::Warning ? 1 : 0);
+    }
+}
+
+bool CodeView::viewportEvent(QEvent* e) {
+    if (e->type() == QEvent::ToolTip) {
+        QHelpEvent* he = static_cast<QHelpEvent*>(e);
+        QString tip;
+        const QPoint pt = he->pos();
+        if (pt.x() >= gutterW_ && lineH_ > 0 && charW_ > 0) {
+            const size_t l = firstVisible() + static_cast<size_t>(pt.y() / lineH_);
+            if (l < ed_.doc().lineCount()) {
+                std::vector<Squig> sq;
+                collectSquiggles(l, l + 1, sq);
+                const std::string raw = lineText(l);
+                const int dc = (pt.x() - textLeft() + horizontalScrollBar()->value()) / charW_;
+                for (const Squig& q : sq) {
+                    const int a = displayCol(raw, q.col);
+                    int b = displayCol(raw, std::min(raw.size(), q.col + q.len));
+                    if (b <= a) b = a + 1;
+                    if (dc >= a && dc < b) {
+                        if (!tip.isEmpty()) tip += "\n";
+                        tip += QString(q.sev == 0 ? "error: " : "warning: ") + q.text;
+                    }
+                }
+            }
+        }
+        if (tip.isEmpty()) { QToolTip::hideText(); e->ignore(); }
+        else QToolTip::showText(he->globalPos(), tip, viewport());
+        return true;
+    }
+    return QAbstractScrollArea::viewportEvent(e);
+}
+
+// ---------------------------------------------------------------- snippets
+
+bool CodeView::snippetAtCursor() const {
+    if (hasSelection()) return false;
+    try {
+        const std::string w = prefixBefore(ed_.doc(), cur_);
+        if (w.empty() || w.size() > SnippetTable::kMaxTrigger) return false;
+        return SnippetStore::instance().table().find(w) != nullptr;
+    } catch (const std::exception&) {
+        return false;
+    }
+}
+
+bool CodeView::tryExpandSnippet() {
+    snippetMsg_.clear();
+    if (hasSelection()) { snippetMsg_ = "Clear the selection first to expand a snippet."; return false; }
+    hidePopup();
+    SnippetExpansion r;
+    try {
+        r = applySnippet(ed_, SnippetStore::instance().table(), cur_);
+    } catch (const std::exception& ex) {
+        snippetMsg_ = QString::fromUtf8(ex.what());
+        return false;
+    }
+    if (!r.expanded) { snippetMsg_ = QString::fromStdString(r.reason); return false; }
+    const size_t from = cur_.line;
+    cur_ = anchor_ = clamp(r.cursor);
+    blockValid_ = 0;
+    edited(from);
+    emit statusMessage("Snippet \"" + QString::fromStdString(r.trigger) + "\" expanded.");
+    return true;
+}
+
+void CodeView::expandSnippet() {
+    if (!tryExpandSnippet()) emit statusMessage(snippetMsg_);
+}
+
 void CodeView::edited(size_t fromLine) {
+    ++revision_;
+    shiftDiagnostics(fromLine, ed_.doc().lineCount());
     dirtyBrackets_ = true;
     bracketTimer_.start(250);
     blockValid_ = std::min(blockValid_, fromLine + 1);
@@ -384,6 +528,12 @@ void CodeView::recomputeBrackets() {
     if (ed_.doc().charCount() > 4000000) report_ = BracketReport();
     else report_ = checkBrackets(ed_.doc());
     dirtyBrackets_ = false;
+    bracketDiags_.clear();
+    {
+        const DynArray<Diagnostic> b = fromBrackets(report_);
+        for (size_t i = 0; i < b.size(); ++i) bracketDiags_.push_back(b[i]);
+    }
+    emit diagnosticsChanged();
     emit stateChanged();
     viewport()->update();
 }
@@ -532,6 +682,9 @@ void CodeView::paintEvent(QPaintEvent*) {
         hi = lo;
     }
 
+    std::vector<Squig> squigs;
+    collectSquiggles(first, last, squigs);
+
     std::vector<Span> spans;
     for (size_t l = first; l < last; ++l) {
         const int y = static_cast<int>(l - first) * lineH_;
@@ -579,6 +732,19 @@ void CodeView::paintEvent(QPaintEvent*) {
         }
         drawRun(pos, s.size() - pos, cText);
 
+        for (const Squig& q : squigs) {                 // red = error, yellow = warning
+            if (q.line != l) continue;
+            const int a = displayCol(raw, q.col);
+            int b = displayCol(raw, std::min(raw.size(), q.col + q.len));
+            if (b <= a) b = a + 1;
+            const int x0 = left + a * charW_, x1 = left + b * charW_, base = y + lineH_ - 2;
+            p.setPen(QPen(q.sev == 0 ? QColor(0xf1, 0x4c, 0x4c) : QColor(0xcc, 0xa7, 0x00), 1));
+            QPolygon zig;
+            bool up = false;
+            for (int x = x0; x <= x1; x += 2) { zig << QPoint(x, up ? base - 2 : base); up = !up; }
+            if (zig.size() >= 2) p.drawPolyline(zig);
+        }
+
         if (haveBracket) {
             const Pos* pts[2] = {&b1, &b2};
             for (int k = 0; k < 2; ++k) {
@@ -607,6 +773,17 @@ void CodeView::paintEvent(QPaintEvent*) {
         const int y = static_cast<int>(l - first) * lineH_;
         p.setPen(l == cur_.line ? kGutterCur : kGutterNum);
         p.drawText(QRect(0, y, gutterW_ - 10, lineH_), Qt::AlignRight | Qt::AlignVCenter, QString::number(l + 1));
+    }
+    if (!squigs.empty()) {                              // a dot in the gutter on every line with a problem
+        p.setRenderHint(QPainter::Antialiasing, true);
+        p.setPen(Qt::NoPen);
+        for (int sev = 1; sev >= 0; --sev) {            // warnings first, so an error on the same line wins
+            p.setBrush(sev == 0 ? QColor(0xf1, 0x4c, 0x4c) : QColor(0xcc, 0xa7, 0x00));
+            for (const Squig& q : squigs)
+                if (q.sev == sev && q.line >= first && q.line < last)
+                    p.drawEllipse(QRectF(3, static_cast<int>(q.line - first) * lineH_ + (lineH_ - 7) / 2.0, 7, 7));
+        }
+        p.setRenderHint(QPainter::Antialiasing, false);
     }
 }
 
@@ -734,6 +911,7 @@ void CodeView::pressEnter() {
 void CodeView::pressTab(bool back) {
     if (back) { outdentSelection(); return; }
     if (hasSelection() && selStart().line != selEnd().line) { indentSelection(); return; }
+    if (tryExpandSnippet()) return;                   // "for" + Tab -> the for-loop snippet
     const int n = tabWidth_ - (displayColumn(selStart()) % tabWidth_);
     insertTypedText(std::string(static_cast<size_t>(n), ' '));
 }
@@ -752,6 +930,7 @@ void CodeView::undo() {
     if (!ed_.undo(&label, &where)) return;
     cur_ = anchor_ = clamp(where);
     blockValid_ = 0;
+    compilerDiags_.clear();                 // the edit position is unknown: the next check redraws the marks
     edited(0);
 }
 
@@ -762,6 +941,7 @@ void CodeView::redo() {
     if (!ed_.redo(&label, &where)) return;
     cur_ = anchor_ = clamp(where);
     blockValid_ = 0;
+    compilerDiags_.clear();
     edited(0);
 }
 
@@ -985,7 +1165,11 @@ void CodeView::keyPressEvent(QKeyEvent* e) {
         switch (e->key()) {
             case Qt::Key_Down: popup_->setCurrentRow(std::min(popup_->currentRow() + 1, popup_->count() - 1)); return;
             case Qt::Key_Up: popup_->setCurrentRow(std::max(popup_->currentRow() - 1, 0)); return;
-            case Qt::Key_Return: case Qt::Key_Enter: case Qt::Key_Tab: acceptCompletion(); return;
+            case Qt::Key_Return: case Qt::Key_Enter: acceptCompletion(); return;
+            case Qt::Key_Tab:                                   // an exact snippet trigger wins over a completion
+                if (snippetAtCursor() && tryExpandSnippet()) return;
+                acceptCompletion();
+                return;
             case Qt::Key_Escape: hidePopup(); return;
             default: break;
         }
