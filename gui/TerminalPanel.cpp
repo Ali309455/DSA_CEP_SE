@@ -24,15 +24,22 @@
 // ---------------------------------------------------------------- helpers
 
 namespace {
-// ANSI colour indexes 0-7 and 8-15 (bright), tuned for the dark editor background
-const QColor kAnsi[16] = {
+// ANSI colour indexes 0-7 and 8-15 (bright): one set tuned for dark themes, one for light themes
+const QColor kAnsiDark[16] = {
     QColor(0x3c, 0x3c, 0x3c), QColor(0xf4, 0x7a, 0x6b), QColor(0x7f, 0xd0, 0x8a), QColor(0xe5, 0xc0, 0x7b),
     QColor(0x6e, 0xa2, 0xff), QColor(0xc6, 0x78, 0xdd), QColor(0x56, 0xc2, 0xd0), QColor(0xd4, 0xd4, 0xd4),
     QColor(0x7a, 0x7a, 0x7a), QColor(0xff, 0x9a, 0x8c), QColor(0x9a, 0xe6, 0xa4), QColor(0xf2, 0xd3, 0x95),
     QColor(0x92, 0xbc, 0xff), QColor(0xd9, 0x9a, 0xee), QColor(0x7a, 0xd7, 0xe3), QColor(0xff, 0xff, 0xff)};
+const QColor kAnsiLight[16] = {
+    QColor(0x3c, 0x3c, 0x3c), QColor(0xcd, 0x31, 0x31), QColor(0x1a, 0x7f, 0x37), QColor(0x9a, 0x67, 0x00),
+    QColor(0x05, 0x50, 0xae), QColor(0xa6, 0x26, 0xa4), QColor(0x0b, 0x72, 0x85), QColor(0x55, 0x5b, 0x63),
+    QColor(0x6e, 0x77, 0x81), QColor(0xd1, 0x24, 0x2f), QColor(0x2e, 0x9a, 0x4a), QColor(0xb0, 0x7d, 0x00),
+    QColor(0x09, 0x69, 0xda), QColor(0x82, 0x50, 0xdf), QColor(0x1b, 0x8a, 0x9e), QColor(0x1f, 0x23, 0x28)};
+
+const QColor& ansi16(int i) { return (Theme::isDark() ? kAnsiDark : kAnsiLight)[std::max(0, std::min(15, i))]; }
 
 QColor ansi256(int n) {
-    if (n < 16) return kAnsi[std::max(0, n)];
+    if (n < 16) return ansi16(n);
     if (n >= 232) { const int g = 8 + (n - 232) * 10; return QColor(g, g, g); }
     n -= 16;
     auto lvl = [](int v) { return v == 0 ? 0 : 55 + v * 40; };
@@ -77,8 +84,7 @@ void TerminalPanel::appendAnsi(QPlainTextEdit* edit, const QString& textIn) {
     QTextCursor cur(edit->document());
     cur.movePosition(QTextCursor::End);
     QTextCharFormat fmt = cur.charFormat();
-    const QColor base = QColor(0xd4, 0xd4, 0xd4);
-    fmt.setForeground(base);
+    fmt.clearForeground();                           // plain text uses the terminal's own colour, so it follows the theme
     fmt.setFontWeight(QFont::Normal);
     auto put = [&](QString s) {
         s.remove('\r');
@@ -96,15 +102,15 @@ void TerminalPanel::appendAnsi(QPlainTextEdit* edit, const QString& textIn) {
         const QStringList parts = m.captured(1).split(';');
         for (int i = 0; i < parts.size(); ++i) {
             const int n = parts[i].isEmpty() ? 0 : parts[i].toInt();
-            if (n == 0) { fmt.setForeground(base); fmt.setBackground(Qt::transparent); fmt.setFontWeight(QFont::Normal); fmt.setFontUnderline(false); }
+            if (n == 0) { fmt.clearForeground(); fmt.setBackground(Qt::transparent); fmt.setFontWeight(QFont::Normal); fmt.setFontUnderline(false); }
             else if (n == 1) fmt.setFontWeight(QFont::Bold);
             else if (n == 22) fmt.setFontWeight(QFont::Normal);
             else if (n == 4) fmt.setFontUnderline(true);
             else if (n == 24) fmt.setFontUnderline(false);
-            else if (n >= 30 && n <= 37) fmt.setForeground(kAnsi[n - 30 + (n == 30 ? 8 : 0)]);
-            else if (n == 39) fmt.setForeground(base);
-            else if (n >= 90 && n <= 97) fmt.setForeground(kAnsi[n - 90 + 8]);
-            else if (n >= 40 && n <= 47) fmt.setBackground(kAnsi[n - 40].darker(n == 40 ? 100 : 160));
+            else if (n >= 30 && n <= 37) fmt.setForeground(ansi16(n - 30 + (n == 30 ? 8 : 0)));
+            else if (n == 39) fmt.clearForeground();
+            else if (n >= 90 && n <= 97) fmt.setForeground(ansi16(n - 90 + 8));
+            else if (n >= 40 && n <= 47) fmt.setBackground(Theme::isDark() ? ansi16(n - 40).darker(n == 40 ? 100 : 160) : ansi16(n - 40).lighter(n == 40 ? 175 : 250));
             else if (n == 49) fmt.setBackground(Qt::transparent);
             else if ((n == 38 || n == 48) && i + 2 < parts.size() && parts[i + 1] == "5") {
                 const QColor c = ansi256(parts[i + 2].toInt());
@@ -140,7 +146,7 @@ TerminalPanel::TerminalPanel(QWidget* parent) : QWidget(parent) {
     h->setContentsMargins(14, 0, 8, 0);
     h->setSpacing(8);
     QLabel* ico = new QLabel(head);
-    ico->setPixmap(Icons::get(Icons::Terminal, QColor(0x9d, 0x9d, 0x9d)).pixmap(QSize(16, 16)));
+    ico->setPixmap(Icons::get(Icons::Terminal).pixmap(QSize(16, 16)));
     QLabel* title = new QLabel("TERMINAL", head);
     title->setObjectName("terminalTitle");
     chip_ = new QLabel(head);
@@ -156,7 +162,7 @@ TerminalPanel::TerminalPanel(QWidget* parent) : QWidget(parent) {
     h->addWidget(cwdLabel_, 1);
     auto button = [head](Icons::Glyph g, const QString& tip) {
         QToolButton* b = new QToolButton(head);
-        b->setIcon(Icons::get(g, QColor(0x9d, 0x9d, 0x9d), QColor(0xff, 0xff, 0xff)));
+        b->setIcon(Icons::get(g));
         b->setIconSize(QSize(16, 16));
         b->setFixedSize(26, 26);
         b->setToolTip(tip);
@@ -207,7 +213,7 @@ TerminalPanel::TerminalPanel(QWidget* parent) : QWidget(parent) {
     setFocusProxy(input_);
 
     applySettings();
-    writeNote("DevPad terminal. Type a command; Ctrl+C stops a running program, Ctrl+L clears the screen.", QColor(0x7a, 0x7a, 0x7a));
+    writeNote("DevPad terminal. Type a command; Ctrl+C stops a running program, Ctrl+L clears the screen.", Theme::Dim);
     refreshPrompt();
 }
 
@@ -325,7 +331,7 @@ void TerminalPanel::echoCommand(const QString& line) {
     QTextCharFormat p, t;
     p.setForeground(Theme::Accent);
     p.setFontWeight(QFont::DemiBold);
-    t.setForeground(QColor(0xf0, 0xf0, 0xf0));
+    t.setForeground(Theme::Heading);
     const QString name = QFileInfo(cwd_).fileName();
     cur.insertText((name.isEmpty() ? shortDir(cwd_) : name) + QString::fromUtf8(" \xe2\x9d\xaf "), p);
     cur.insertText(line + "\n", t);
@@ -378,7 +384,7 @@ bool TerminalPanel::builtin(const QString& line) {
         arg = arg.mid(1, arg.size() - 2);
     if (arg.isEmpty()) {
 #ifdef Q_OS_WIN
-        writeNote(QDir::toNativeSeparators(cwd_), QColor(0xd4, 0xd4, 0xd4));       // cmd: a bare "cd" shows the folder
+        writeNote(QDir::toNativeSeparators(cwd_), Theme::Syntax[0]);       // cmd: a bare "cd" shows the folder
         return true;
 #else
         arg = QDir::homePath();
@@ -389,7 +395,7 @@ bool TerminalPanel::builtin(const QString& line) {
     const QString target = QFileInfo(arg).isAbsolute() ? arg : QDir(cwd_).filePath(arg);
     const QFileInfo fi(target);
     if (!fi.isDir()) {
-        writeNote("cd: no such folder: " + arg, QColor(0xf4, 0x7a, 0x6b));
+        writeNote("cd: no such folder: " + arg, Theme::Error);
         return true;
     }
     setWorkingDirectory(fi.canonicalFilePath());
@@ -409,7 +415,7 @@ void TerminalPanel::start(const QString& line) {
     connect(proc_, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished), this, &TerminalPanel::onFinished);
     connect(proc_, &QProcess::errorOccurred, this, [this](QProcess::ProcessError err) {
         if (err != QProcess::FailedToStart) return;
-        writeNote("Could not start '" + shellName() + "'. Check the shell in Settings > Terminal.", QColor(0xf4, 0x7a, 0x6b));
+        writeNote("Could not start '" + shellName() + "'. Check the shell in Settings > Terminal.", Theme::Error);
         refreshPrompt();
     });
 
@@ -426,8 +432,8 @@ void TerminalPanel::start(const QString& line) {
 void TerminalPanel::onFinished(int code, QProcess::ExitStatus status) {
     writeOut(QString::fromLocal8Bit(proc_->readAll()));
     const bool ok = status == QProcess::NormalExit && code == 0;
-    if (status == QProcess::CrashExit) writeNote("[stopped]", QColor(0xe5, 0xc0, 0x7b));
-    else if (code != 0) writeNote(QString("[exit code %1]").arg(code), QColor(0xf4, 0x7a, 0x6b));
+    if (status == QProcess::CrashExit) writeNote("[stopped]", Theme::Warning);
+    else if (code != 0) writeNote(QString("[exit code %1]").arg(code), Theme::Error);
     if (!ok) queue_.clear();
     refreshPrompt();
     if (!queue_.isEmpty()) {
@@ -447,7 +453,7 @@ void TerminalPanel::runSequence(const QStringList& lines) {
         proc_->disconnect(this);
         proc_->kill();
         proc_->waitForFinished(2000);
-        writeNote("[stopped]", QColor(0xe5, 0xc0, 0x7b));
+        writeNote("[stopped]", Theme::Warning);
     }
     QStringList rest = lines;
     const QString first = rest.takeFirst();

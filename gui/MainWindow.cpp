@@ -1,6 +1,7 @@
 #include "MainWindow.h"
 
 #include <QAction>
+#include <QActionGroup>
 #include <QApplication>
 #include <QCheckBox>
 #include <QClipboard>
@@ -138,8 +139,8 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
         const bool clean = e + w == 0;
         issueBtn_->setText(clean ? QString("No problems")
                                  : QString("%1 error%2, %3 warning%4").arg(e).arg(e == 1 ? "" : "s").arg(w).arg(w == 1 ? "" : "s"));
-        issueBtn_->setIcon(clean ? Icons::get(Icons::Check, QColor(0x73, 0xc9, 0x91), QColor(0x73, 0xc9, 0x91))
-                                 : Icons::get(Icons::Warning, QColor(0xe2, 0xb7, 0x14), QColor(0xe2, 0xb7, 0x14)));
+        issueBtn_->setIcon(clean ? Icons::get(Icons::Check, Theme::Success, Theme::Success)
+                                 : Icons::get(Icons::Warning, Theme::Warning, Theme::Warning));
         issueBtn_->setToolTip(clean ? QString() : QString("Show the Problems panel"));
     });
     bottom_ = new QTabWidget(this);
@@ -193,7 +194,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     langLabel_ = new QLabel();
     eolLabel_ = new QLabel("LF");
     issueBtn_ = new QPushButton("No problems");
-    issueBtn_->setIcon(Icons::get(Icons::Check, QColor(0x73, 0xc9, 0x91), QColor(0x73, 0xc9, 0x91)));
+    issueBtn_->setIcon(Icons::get(Icons::Check, Theme::Success, Theme::Success));
     issueBtn_->setFlat(true);
     issueBtn_->setCursor(Qt::PointingHandCursor);
     connect(issueBtn_, &QPushButton::clicked, this, [this]() {
@@ -208,11 +209,19 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     encLabel_ = new QLabel("UTF-8");
     statusBar()->addPermanentWidget(encLabel_);
     statusBar()->addPermanentWidget(eolLabel_);
+    themeBtn_ = new QPushButton();
+    themeBtn_->setFlat(true);
+    themeBtn_->setCursor(Qt::PointingHandCursor);
+    themeBtn_->setFocusPolicy(Qt::NoFocus);
+    connect(themeBtn_, &QPushButton::clicked, this, [this]() { toggleTheme(); });
+    statusBar()->addPermanentWidget(themeBtn_);
 
     buildActions();
     buildActivityBar();
     applyDarkTheme();
     enableDarkTitleBar(this);
+    onThemeChanged();                                     // theme button text, checked entry in View > Theme
+    connect(&Theme::notifier(), &Theme::Notifier::changed, this, &MainWindow::onThemeChanged);
     updateCentral();
     connect(&AppSettings::instance(), &AppSettings::changed, this, &MainWindow::applyPrefs);
     statusBar()->setVisible(AppSettings::instance().values().statusBar);
@@ -223,12 +232,36 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
 void MainWindow::applyPrefs() {
     const AppSettings::Values& v = AppSettings::instance().values();
     statusBar()->setVisible(v.statusBar);
-    const QColor accent(AppSettings::accentRgb(v.accent));
-    if (accent != Theme::Accent) {
-        Theme::setAccent(accent);
-        welcome_->refreshAccent();
-        update();
+    // the theme and the accent colour are applied by Theme itself; onThemeChanged() follows
+}
+
+// ---------------------------------------------------------------- themes
+
+void MainWindow::setTheme(const QString& id) {
+    AppSettings::Values v = AppSettings::instance().values();
+    v.theme = id;
+    AppSettings::instance().apply(v);
+}
+
+void MainWindow::toggleTheme() { setTheme(Theme::toggledScheme(AppSettings::instance().values().theme)); }
+
+void MainWindow::onThemeChanged() {
+    if (welcome_) welcome_->refreshAccent();
+    enableDarkTitleBar(this);
+    refreshTitleBars();
+    const QString id = Theme::currentScheme();
+    for (QAction* a : themeActs_) a->setChecked(a->data().toString() == id);
+    if (themeBtn_) {
+        themeBtn_->setText(Theme::schemeName(id));
+        themeBtn_->setToolTip(QString("Theme: %1. Click to switch to %2 (Ctrl+Shift+L).")
+                                  .arg(Theme::schemeName(id), Theme::schemeName(Theme::toggledScheme(id))));
     }
+    if (issueBtn_) {
+        const bool clean = issueBtn_->text() == QLatin1String("No problems");
+        issueBtn_->setIcon(clean ? Icons::get(Icons::Check, Theme::Success, Theme::Success)
+                                 : Icons::get(Icons::Warning, Theme::Warning, Theme::Warning));
+    }
+    update();
 }
 
 SettingsDialog* MainWindow::showSettings(const QString& section) {
@@ -414,31 +447,30 @@ void MainWindow::buildActivityBar() {
     bar->toggleViewAction()->setVisible(false);
     addToolBar(Qt::LeftToolBarArea, bar);
 
-    const QColor rest(0x85, 0x85, 0x85), lit(0xf0, 0xf0, 0xf0);
     QAction* side = dock_->toggleViewAction();             // checkable: shows whether the Explorer is open
-    side->setIcon(Icons::get(Icons::Files, rest, lit));
+    side->setIcon(Icons::get(Icons::Files));
     side->setToolTip("Explorer (Ctrl+B)");
     bar->addAction(side);
-    QAction* find = bar->addAction(Icons::get(Icons::Search, rest, lit), "Find");
+    QAction* find = bar->addAction(Icons::get(Icons::Search), "Find");
     find->setToolTip("Find in File (Ctrl+F)");
     connect(find, &QAction::triggered, this, [this]() { showFind(false); });
-    QAction* go = bar->addAction(Icons::get(Icons::Palette, rest, lit), "Go to File");
+    QAction* go = bar->addAction(Icons::get(Icons::Palette), "Go to File");
     go->setToolTip("Go to File (Ctrl+P)");
     connect(go, &QAction::triggered, this, &MainWindow::quickOpen);
-    QAction* playAct = bar->addAction(Icons::get(Icons::Play, rest, lit), "Run File");
+    QAction* playAct = bar->addAction(Icons::get(Icons::Play), "Run File");
     playAct->setToolTip("Run File (F5)");
     connect(playAct, &QAction::triggered, this, [this]() { runCurrent(); });
-    terminalAct_ = bar->addAction(Icons::get(Icons::Terminal, rest, lit), "Terminal");
+    terminalAct_ = bar->addAction(Icons::get(Icons::Terminal), "Terminal");
     terminalAct_->setCheckable(true);
     terminalAct_->setToolTip("Terminal (Ctrl+`)");
     connect(terminalAct_, &QAction::triggered, this, [this](bool on) { showTerminal(on); });
     QWidget* spacer = new QWidget(bar);
     spacer->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Expanding);
     bar->addWidget(spacer);
-    QAction* keys = bar->addAction(Icons::get(Icons::Keyboard, rest, lit), "Keyboard Shortcuts");
+    QAction* keys = bar->addAction(Icons::get(Icons::Keyboard), "Keyboard Shortcuts");
     keys->setToolTip("Keyboard Shortcuts (F1)");
     connect(keys, &QAction::triggered, this, [this]() { showShortcuts(); });
-    QAction* gear = bar->addAction(Icons::get(Icons::Gear, rest, lit), "Settings");
+    QAction* gear = bar->addAction(Icons::get(Icons::Gear), "Settings");
     gear->setToolTip("Settings (Ctrl+,)");
     connect(gear, &QAction::triggered, this, [this]() { showSettings(); });
 }
@@ -604,6 +636,21 @@ void MainWindow::buildActions() {
     add(view, "Zoom In", {QKeySequence(QStringLiteral("Ctrl+=")), QKeySequence(QStringLiteral("Ctrl++"))}, [zoomBy]() { zoomBy(+1); });
     add(view, "Zoom Out", seq("Ctrl+-"), [zoomBy]() { zoomBy(-1); });
     add(view, "Reset Zoom", seq("Ctrl+0"), [zoomBy]() { zoomBy(0); });
+    view->addSeparator();
+    QMenu* themeMenu = view->addMenu("Theme");
+    QActionGroup* themeGroup = new QActionGroup(this);
+    for (int i = 0; i < Theme::schemeCount(); ++i) {
+        const Theme::SchemeInfo t = Theme::schemeInfo(i);
+        QAction* a = themeMenu->addAction(t.name + (t.dark ? "  (dark)" : "  (light)"));
+        a->setCheckable(true);
+        a->setData(t.id);
+        a->setChecked(t.id == Theme::currentScheme());
+        themeGroup->addAction(a);
+        themeActs_.append(a);
+        const QString id = t.id;
+        connect(a, &QAction::triggered, this, [this, id]() { setTheme(id); });
+    }
+    add(view, "Toggle Light / Dark Theme", seq("Ctrl+Shift+L"), [this]() { toggleTheme(); });
 
     QMenu* help = menuBar()->addMenu("&Help");
     shortcutsAct_ = add(help, "Keyboard Shortcuts", seq("F1"), [this]() { showShortcuts(); });
@@ -633,7 +680,7 @@ void MainWindow::buildFindBar() {
     r1->setSpacing(4);
     find_ = new QLineEdit();
     find_->setPlaceholderText("Find");
-    find_->addAction(Icons::get(Icons::Search, QColor(0x80, 0x80, 0x80)), QLineEdit::LeadingPosition);
+    find_->addAction(Icons::get(Icons::Search), QLineEdit::LeadingPosition);
     caseBox_ = iconButton(Icons::CaseSensitive, "Match case", true);
     wordBox_ = iconButton(Icons::WholeWord, "Match whole word", true);
     findCount_ = new QLabel();
@@ -727,7 +774,7 @@ void MainWindow::highlightAll() {
     for (size_t i = 0; i < all.size(); ++i) matches_.push_back(all[i]);
     v->setSearchHighlights(matches_);
     findCount_->setText(matches_.empty() ? QStringLiteral("No results") : QString("%1 found").arg(matches_.size()));
-    findCount_->setStyleSheet(matches_.empty() ? "color:#f48771;" : "");
+    findCount_->setStyleSheet(matches_.empty() ? QString("color:%1;").arg(Theme::Error.name()) : QString());
 }
 
 void MainWindow::updateFind() {
@@ -824,7 +871,7 @@ CodeView* MainWindow::newTab(const QString& path) {
     const int i = tabs_->addTab(v, QString());
     QToolButton* x = new QToolButton(tabs_->tabBar());
     x->setObjectName("tabClose");
-    x->setIcon(Icons::get(Icons::Close, QColor(0x9d, 0x9d, 0x9d), QColor(0xff, 0xff, 0xff)));
+    x->setIcon(Icons::get(Icons::Close));
     x->setIconSize(QSize(14, 14));
     x->setFixedSize(20, 20);
     x->setAutoRaise(true);
@@ -1121,15 +1168,16 @@ void MainWindow::quickOpen() {
 
     QDialog dlg(this, Qt::Dialog | Qt::FramelessWindowHint);
     dlg.setObjectName("quickOpen");
-    dlg.setStyleSheet("QDialog#quickOpen{background:#1f1f1f;border:1px solid #3a3a3a;}"
-                      "QListWidget{background:#1f1f1f;border:0;}"
-                      "QListWidget::item{padding:5px 6px;border-radius:5px;}"
-                      "QListWidget::item:selected{background:#233a5e;color:#ffffff;}");
+    dlg.setStyleSheet(QString("QDialog#quickOpen{background:%1;border:1px solid %2;}"
+                              "QListWidget{background:%1;border:0;}"
+                              "QListWidget::item{padding:5px 6px;border-radius:5px;}"
+                              "QListWidget::item:selected{background:%3;color:%4;}")
+                          .arg(Theme::Popup.name(), Theme::InputBorder.name(), Theme::accentDeep().name(), Theme::selectionText().name()));
     dlg.resize(640, 380);
     QVBoxLayout* lay = new QVBoxLayout(&dlg);
     lay->setContentsMargins(6, 6, 6, 6);
     QLineEdit* input = new QLineEdit();
-    input->addAction(Icons::get(Icons::Search, QColor(0x80, 0x80, 0x80)), QLineEdit::LeadingPosition);
+    input->addAction(Icons::get(Icons::Search), QLineEdit::LeadingPosition);
     input->setPlaceholderText(QString("Go to file in %1 … (e.g. \"mw\" finds MainWindow.cpp)").arg(QFileInfo(root_).fileName()));
     QListWidget* list = new QListWidget();
     lay->addWidget(input);

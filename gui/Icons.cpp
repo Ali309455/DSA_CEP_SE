@@ -2,13 +2,17 @@
 
 #include <QFileInfo>
 #include <cmath>
+#include <algorithm>
 #include <QFont>
+#include <QIconEngine>
+#include <QPaintDevice>
 #include <QFontMetricsF>
 #include <QHash>
 #include <QLinearGradient>
 #include <QPainter>
 #include <QPainterPath>
 #include <QPixmap>
+#include "Theme.h"
 
 namespace Icons {
 namespace {
@@ -318,7 +322,38 @@ QPixmap renderFolder(bool open, int size, qreal dpr) {
 
 QColor shade(const QColor& c, int alpha) { QColor x = c; x.setAlpha(alpha); return x; }
 
+// A line icon that takes its colours from the current theme every time it is drawn.
+class ThemedGlyph : public QIconEngine {
+public:
+    explicit ThemedGlyph(Glyph g) : g_(g) {}
+    QIconEngine* clone() const override { return new ThemedGlyph(g_); }
+    QSize actualSize(const QSize& size, QIcon::Mode, QIcon::State) override { return size; }
+    QPixmap pixmap(const QSize& size, QIcon::Mode mode, QIcon::State state) override { return scaledPixmap(size, mode, state, 1.0); }
+    QPixmap scaledPixmap(const QSize& size, QIcon::Mode mode, QIcon::State state, qreal scale) override {
+        QColor c = Theme::IconNormal;
+        if (mode == QIcon::Active || mode == QIcon::Selected || state == QIcon::On) c = Theme::IconActive;
+        if (mode == QIcon::Disabled) c = shade(Theme::IconNormal, 90);
+        const int s = std::max(1, std::min(size.width(), size.height()));
+        static QHash<QString, QPixmap> cache;
+        const QString key = QString("%1/%2/%3/%4").arg(int(g_)).arg(s).arg(scale).arg(c.name(QColor::HexArgb));
+        auto it = cache.find(key);
+        if (it != cache.end()) return *it;
+        const QPixmap pm = renderGlyph(g_, s, c, scale);
+        cache.insert(key, pm);
+        return pm;
+    }
+    void paint(QPainter* p, const QRect& rect, QIcon::Mode mode, QIcon::State state) override {
+        const qreal dpr = p->device() ? p->device()->devicePixelRatioF() : 1.0;
+        p->drawPixmap(rect, scaledPixmap(rect.size(), mode, state, dpr));
+    }
+
+private:
+    Glyph g_;
+};
+
 }  // namespace
+
+QIcon get(Glyph g) { return QIcon(new ThemedGlyph(g)); }
 
 QIcon get(Glyph g, QColor normal, QColor active) {
     static QHash<QString, QIcon> cache;

@@ -129,7 +129,7 @@ public:
 
 QToolButton* toolButton(QWidget* parent, Icons::Glyph g, const QString& tip) {
     QToolButton* b = new QToolButton(parent);
-    b->setIcon(Icons::get(g, QColor(0xa8, 0xa8, 0xa8), QColor(0xf0, 0xf0, 0xf0)));
+    b->setIcon(Icons::get(g));
     b->setIconSize(QSize(16, 16));
     b->setToolTip(tip);
     b->setAutoRaise(true);
@@ -155,7 +155,7 @@ protected:
     void drawBranches(QPainter* p, const QRect& rect, const QModelIndex& idx) const override {
         if (!model() || !model()->hasChildren(idx)) return;
         const bool open = isExpanded(idx);
-        const QIcon icon = Icons::get(open ? Icons::ChevronDown : Icons::ChevronRight, QColor(0xa0, 0xa0, 0xa0), QColor(0xe0, 0xe0, 0xe0));
+        const QIcon icon = Icons::get(open ? Icons::ChevronDown : Icons::ChevronRight);
         const int w = indentation();
         const QRect box(rect.right() - w + 1, rect.top(), w, rect.height());
         const QSize sz(14, 14);
@@ -196,7 +196,7 @@ FileExplorer::FileExplorer(QWidget* parent) : QWidget(parent) {
     filter_->setObjectName("explorerFilter");
     filter_->setPlaceholderText("Filter files");
     filter_->setToolTip("Finds files anywhere in the folder by a few letters of the name, e.g. \"mw\" finds MainWindow.cpp");
-    filter_->addAction(Icons::get(Icons::Search, QColor(0x80, 0x80, 0x80)), QLineEdit::LeadingPosition);
+    filter_->addAction(Icons::get(Icons::Search), QLineEdit::LeadingPosition);
     filter_->setClearButtonEnabled(true);
     filter_->installEventFilter(this);
     QWidget* filterBox = new QWidget(this);

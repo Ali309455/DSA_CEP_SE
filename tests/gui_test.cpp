@@ -26,6 +26,8 @@
 #include <QStatusBar>
 #include <QStandardPaths>
 #include <QTextCursor>
+#include <QPixmap>
+#include <cmath>
 #include "Controls.h"
 #include "Runner.h"
 #include "Settings.h"
@@ -744,6 +746,71 @@ static void testSettingsDialog() {
     d->close();
 }
 
+static void testThemes() {
+    std::cout << "[themes: switch, toggle, persistence, settings window]\n";
+    AppSettings& S = AppSettings::instance();
+    S.resetToDefaults();
+    MainWindow w;
+    w.show();
+    CHECK(Theme::schemeCount() == 4 && Theme::currentScheme() == "midnight" && Theme::isDark());
+    CHECK(Theme::Editor == QColor(0x1f, 0x1f, 0x1f));
+
+    // a theme change is a settings change: colours, style sheet and the stored value all follow
+    QSignalSpy changed(&Theme::notifier(), &Theme::Notifier::changed);
+    w.setTheme("daylight");
+    CHECK(S.values().theme == "daylight" && Theme::currentScheme() == "daylight" && !Theme::isDark());
+    CHECK(Theme::Editor == QColor(0xff, 0xff, 0xff) && Theme::Text.lightness() < Theme::Editor.lightness());
+    CHECK(changed.count() >= 1);
+    CHECK(qApp->styleSheet().contains(Theme::Editor.name()));
+    CHECK(AppSettings::sanitized([&]() { AppSettings::Values v = S.values(); v.theme = "nonsense"; return v; }()).theme == "midnight");
+
+    // every theme can be selected and keeps readable text on the editor background
+    for (const QString& id : Theme::schemeIds()) {
+        w.setTheme(id);
+        CHECK(Theme::currentScheme() == id && S.values().theme == id);
+        CHECK(std::abs(Theme::Syntax[0].lightness() - Theme::Editor.lightness()) > 90);
+        CHECK(Theme::isDark() == (Theme::Editor.lightness() < 128));
+    }
+
+    // the quick toggle switches light <-> dark and is its own inverse
+    w.setTheme("midnight");
+    w.toggleTheme();
+    CHECK(Theme::currentScheme() == "daylight");
+    w.toggleTheme();
+    CHECK(Theme::currentScheme() == "midnight");
+    w.setTheme("nord");
+    w.toggleTheme();
+    CHECK(Theme::currentScheme() == "solarized-light" && !Theme::isDark());
+    w.toggleTheme();
+    CHECK(Theme::currentScheme() == "nord");
+
+    // the editor repaints with the new colours without being rebuilt
+    CodeView* v = w.newTab();
+    v->resize(400, 200);
+    v->show();
+    w.setTheme("daylight");
+    QPixmap light = v->grab();
+    w.setTheme("midnight");
+    QPixmap dark = v->grab();
+    CHECK(light.toImage().pixelColor(2, 2) != dark.toImage().pixelColor(2, 2));
+
+    // the settings window offers the themes and applies the choice at once
+    SettingsDialog* d = w.showSettings();
+    Combo* combo = qobject_cast<Combo*>(d->control("Theme"));
+    CHECK(combo && combo->count() == Theme::schemeCount() && combo->currentData().toString() == "midnight");
+    combo->setCurrentIndex(combo->findData("nord"));
+    emit combo->activated(combo->currentIndex());
+    CHECK(S.values().theme == "nord" && Theme::currentScheme() == "nord");
+    // a change from elsewhere (the View menu, the toggle) shows in the window
+    w.setTheme("solarized-light");
+    CHECK(combo->currentData().toString() == "solarized-light");
+    d->close();
+
+    // reset puts the default theme back
+    S.resetToDefaults();
+    CHECK(Theme::currentScheme() == "midnight" && Theme::Editor == QColor(0x1f, 0x1f, 0x1f));
+}
+
 static void testShortcutsWindow() {
     std::cout << "[keyboard shortcuts window]\n";
     const QList<ShortcutsDialog::Entry>& list = ShortcutsDialog::entries();
@@ -817,7 +884,7 @@ static void testTerminal() {
     c.setPosition(1);
     CHECK(c.charFormat().foreground().color() == QColor(0xf4, 0x7a, 0x6b));
     c.setPosition(5);
-    CHECK(c.charFormat().foreground().color() == QColor(0xd4, 0xd4, 0xd4));
+    CHECK(!c.charFormat().hasProperty(QTextFormat::ForegroundBrush));      // plain text: no fixed colour, it follows the theme
 
     TerminalPanel t;
     t.resize(700, 300);
@@ -1191,6 +1258,7 @@ int main(int argc, char** argv) {
     testWelcome();
     testSettings();
     testSettingsDialog();
+    testThemes();
     testShortcutsWindow();
     testTerminal();
     testPanelsInMainWindow();

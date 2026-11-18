@@ -12,7 +12,7 @@
 #include <QVBoxLayout>
 
 // links and card icons follow the accent colour chosen in Settings
-static QColor linkColor() { return Theme::Accent.lighter(125); }
+static QColor linkColor() { return Theme::isDark() ? Theme::Accent.lighter(125) : Theme::Accent.darker(118); }
 static QString linkStyle() { return QString("color:%1;text-decoration:none;").arg(linkColor().name()); }
 
 static QString esc(const QString& s) { return s.toHtmlEscaped(); }
@@ -57,9 +57,9 @@ QPushButton* WelcomePage::card(const QString& target, int glyph, const QString& 
     QVBoxLayout* t = new QVBoxLayout();
     t->setSpacing(1);
     QLabel* l1 = new QLabel(title, b);
-    l1->setStyleSheet("color:#e8e8e8;font-weight:600;font-size:13px;background:transparent;");
+    l1->setObjectName("welcomeCardTitle");
     QLabel* l2 = new QLabel(hint, b);
-    l2->setStyleSheet("color:#8a8a8a;font-size:12px;background:transparent;");
+    l2->setObjectName("welcomeCardHint");
     t->addWidget(l1);
     t->addWidget(l2);
     h->addWidget(icon);
@@ -200,7 +200,7 @@ void WelcomePage::setFolderOpen(bool open) { quick_->setVisible(open); }
 
 void WelcomePage::refreshLinks() {
     auto text = [](const char* target, const char* label, const char* key) {
-        return QString("<a href=\"%1\" style=\"%2\">%3</a>&nbsp;&nbsp;<span style=\"color:#7a7a7a\">%4</span>").arg(target, linkStyle(), label, key);
+        return QString("<a href=\"%1\" style=\"%2\">%3</a>&nbsp;&nbsp;<span style=\"color:%5\">%4</span>").arg(target, linkStyle(), label, key, Theme::Dim.name());
     };
     keysLink_->setText(text("keys", "All keyboard shortcuts…", "F1"));
     settingsLink_->setText(text("settings", "Settings…", "Ctrl+,"));
@@ -231,8 +231,8 @@ void WelcomePage::setRecent(const QStringList& files, const QStringList& folders
         row->setSpacing(8);
         QLabel* icon = new QLabel(rowW);
         icon->setPixmap((kind == "folder" ? Icons::folder(false) : Icons::forFile(name)).pixmap(QSize(16, 16)));
-        QLabel* l = link(QString("<a href=\"%1:%2\" style=\"%3\">%4</a>&nbsp;&nbsp;<span style=\"color:#6e6e6e\">%5</span>")
-                             .arg(kind, esc(path), linkStyle(), esc(name), esc(where)),
+        QLabel* l = link(QString("<a href=\"%1:%2\" style=\"%3\">%4</a>&nbsp;&nbsp;<span style=\"color:%6\">%5</span>")
+                             .arg(kind, esc(path), linkStyle(), esc(name), esc(where), Theme::Dim.name()),
                          rowW);
         l->setToolTip(QDir::toNativeSeparators(path));
         row->addWidget(icon);

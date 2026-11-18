@@ -85,7 +85,7 @@ void SettingsDialog::buildUi() {
     search_->setPlaceholderText("Search settings");
     search_->setClearButtonEnabled(true);
     search_->setFixedWidth(280);
-    search_->addAction(Icons::get(Icons::Search, QColor(0x80, 0x80, 0x80)), QLineEdit::LeadingPosition);
+    search_->addAction(Icons::get(Icons::Search), QLineEdit::LeadingPosition);
     hh->addWidget(search_, 0, Qt::AlignBottom);
     root->addWidget(head);
 
@@ -149,6 +149,20 @@ void SettingsDialog::buildUi() {
     // ---- Appearance ----
     beginSection("Appearance", "Colours and what is drawn around the text.");
     {
+        Combo* theme = new Combo();
+        for (int i = 0; i < Theme::schemeCount(); ++i) {
+            const Theme::SchemeInfo t = Theme::schemeInfo(i);
+            theme->addItem(t.name + (t.dark ? "  (dark)" : "  (light)"), t.id);
+        }
+        addRow("Theme", "Colours of the editor, the sidebar and every window. Ctrl+Shift+L switches between light and dark.", theme,
+               "colour color scheme dark light mode midnight daylight nord solarized");
+        connect(theme, QOverload<int>::of(&QComboBox::activated), this, [this, theme](int i) {
+            const QString id = theme->itemData(i).toString();
+            edit([&](AppSettings::Values& v) { v.theme = id; });
+        });
+        sync_.push_back([theme](const AppSettings::Values& v) { theme->setCurrentIndex(std::max(0, theme->findData(v.theme))); });
+    }
+    {
         int n = 0;
         const AppSettings::Accent* acc = AppSettings::accents(&n);
         QList<QColor> colors;
@@ -210,7 +224,7 @@ void SettingsDialog::buildUi() {
     const struct { const char* name; Icons::Glyph icon; } navItems[] = {
         {"Editor", Icons::Editor}, {"Appearance", Icons::Brush}, {"Terminal", Icons::Terminal}, {"General", Icons::Gear}};
     for (const auto& n : navItems) {
-        QListWidgetItem* it = new QListWidgetItem(Icons::get(n.icon, QColor(0x9d, 0x9d, 0x9d), QColor(0xff, 0xff, 0xff)), n.name, nav_);
+        QListWidgetItem* it = new QListWidgetItem(Icons::get(n.icon), n.name, nav_);
         it->setData(Qt::UserRole, QString(n.name));
     }
     nav_->setCurrentRow(0);

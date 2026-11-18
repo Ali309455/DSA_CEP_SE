@@ -1,7 +1,7 @@
 // Icons.h - every icon DevPad uses, drawn with QPainter (no image files, sharp at any screen scale).
 //
 //   Icons::get(Icons::Search)       line icons for toolbars and buttons (dim normally, bright on
-//                                   hover / when checked)
+//                                   hover / when checked), coloured by the current theme
 //   Icons::forFile("main.cpp")      coloured badge per file type, used in the Explorer and on tabs
 //   Icons::folder(open)             folder, closed or open
 //   Icons::app()                    the application icon
@@ -23,8 +23,12 @@ enum Glyph {
     Terminal, Gear, Trash, Stop, Editor, Brush, Plus, Play      // terminal panel, settings window
 };
 
-// A line icon. 'normal' is the colour at rest; hovered and checked states use 'active'.
-QIcon get(Glyph g, QColor normal = QColor(0x9d, 0x9d, 0x9d), QColor active = QColor(0xe8, 0xe8, 0xe8));
+// A line icon in the colours of the current theme (Theme::IconNormal at rest, Theme::IconActive when hovered
+// or checked). It is drawn on demand, so it follows a theme change without being rebuilt.
+QIcon get(Glyph g);
+
+// A line icon in fixed colours. 'normal' is the colour at rest; hovered and checked states use 'active'.
+QIcon get(Glyph g, QColor normal, QColor active = QColor(0xe8, 0xe8, 0xe8));
 
 // Coloured file-type badge ("++" for C++, "H" for headers, "{}" for JSON, ...).
 QIcon forFile(const QString& fileName);

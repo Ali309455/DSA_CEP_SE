@@ -4,6 +4,7 @@
 // (Ctrl+P), file manager sidebar (FileExplorer), rename file (F2), session restore. All text editing and all
 // searching is done by the engine; this class wires it to the user interface.
 #pragma once
+#include <QList>
 #include <QMainWindow>
 #include <QPointer>
 #include <QString>
@@ -50,6 +51,8 @@ public:
     void nextTab(int step);
     bool renameCurrentFile(const QString& newName, QString* error);
     void showFind(bool replace);
+    void toggleTheme();                                    // Midnight <-> Daylight, Nord <-> Solarized Light (Ctrl+Shift+L)
+    void setTheme(const QString& id);                      // one of Theme::schemeIds()
     void findNext(bool backwards = false);
     QLineEdit* findField() const { return find_; }
     QLabel* findCount() const { return findCount_; }
@@ -97,6 +100,7 @@ private slots:
     void replaceOne();
     void replaceEverything();
     void closeFind();
+    void onThemeChanged();                                 // the theme or the accent colour changed
     void applyPrefs();                                     // the Settings window changed something
 
 private:
@@ -162,6 +166,8 @@ private:
     void runFind(bool backwards, bool fromSelectionStart);
     std::vector<Match> matches_;
     QPushButton* issueBtn_ = nullptr;
+    QPushButton* themeBtn_ = nullptr;                      // status bar: shows the theme, click toggles light / dark
+    QList<QAction*> themeActs_;                            // View > Theme, one per theme (checkable)
     SearchOptions searchOptions() const;
     void highlightAll();
 };

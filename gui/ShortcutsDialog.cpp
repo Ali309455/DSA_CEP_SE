@@ -29,6 +29,7 @@ const QList<ShortcutsDialog::Entry>& ShortcutsDialog::entries() {
         {"Files and windows", "Show / hide terminal", {"Ctrl+`"}},
         {"Files and windows", "Show / hide Problems", {"Ctrl+Shift+M"}},
         {"Files and windows", "Settings", {"Ctrl+,"}},
+        {"Files and windows", "Switch between light and night theme", {"Ctrl+Shift+L"}},
         {"Files and windows", "Keyboard shortcuts", {"F1"}},
         {"Files and windows", "Quit", {"Ctrl+Q"}},
 
@@ -167,7 +168,7 @@ void ShortcutsDialog::buildUi() {
     search_->setPlaceholderText("Search actions or keys");
     search_->setClearButtonEnabled(true);
     search_->setFixedWidth(280);
-    search_->addAction(Icons::get(Icons::Search, QColor(0x80, 0x80, 0x80)), QLineEdit::LeadingPosition);
+    search_->addAction(Icons::get(Icons::Search), QLineEdit::LeadingPosition);
     hh->addWidget(search_, 0, Qt::AlignBottom);
     root->addWidget(head);
 

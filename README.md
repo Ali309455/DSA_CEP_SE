@@ -74,9 +74,9 @@ gui/SnippetStore.*      the shared snippet table + snippets.txt in the app confi
 engine/Diagnostics.*    compiler-output parser, bracket issues as diagnostics, squiggle length, syntax-check runner
 engine/HashTable.h, Snippets.*  snippet hash table (chaining), `$0` cursor marker, save / load
 gui/Runner.h/cpp        what F5 runs for each file type
-gui/Theme.h/cpp         the dark theme: palette, style sheet, UI and code fonts (one place for every colour)
+gui/Theme.h/cpp         the themes (Midnight, Daylight, Nord, Solarized Light): palettes, style sheet, UI and code fonts (one place for every colour)
 gui/Icons.h/cpp         all icons, drawn in code: line icons, file-type badges, folders, the app icon
-gui/WinTheme.h/cpp      dark title bars on Windows 10 / 11 (dwmapi)
+gui/WinTheme.h/cpp      dark / light title bars on Windows 10 / 11 (dwmapi), following the theme
 gui/devpad.ico, devpad.rc.in   the program icon for devpad.exe
 gui/main.cpp          entry point
 app/console_main.cpp  command-line front end (1-based line/column numbers)
@@ -268,8 +268,13 @@ key presses into engine calls.
 
 ### Look
 
-DevPad uses a modern dark theme (`Theme.h`): neutral chrome around a slightly lighter editor, a blue accent
-taken from the app icon, rounded inputs and menus, thin scroll bars, and a dark title bar on Windows. Every
+DevPad has four themes (`Theme.h`): **Midnight** (the default dark look: neutral chrome around a slightly lighter
+editor), **Daylight** (light), **Nord** (dark blue-grey) and **Solarized Light**. Pick one in
+Settings > Appearance > Theme or in View > Theme; `Ctrl+Shift+L` (or the theme button in the status bar) switches
+between light and dark (Midnight <-> Daylight, Nord <-> Solarized Light). The choice is remembered and applies
+at once to the editor, the syntax colours, the sidebar, the terminal, the dialogs and the Windows title bar. The
+accent colour (blue by default) is chosen separately and works with every theme. Every theme has rounded inputs
+and menus and thin scroll bars. Every
 icon is drawn in code by `Icons.h`, so there are no image files and icons stay sharp at any screen scale. The
 Explorer and the tabs show a coloured badge per file type. The activity bar on the far left has Explorer,
 Find, Go to File and Keyboard Shortcuts. Code uses Cascadia Code / Cascadia Mono when installed (Windows 11),

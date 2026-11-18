@@ -23,7 +23,7 @@
 #include <QWheelEvent>
 #include <algorithm>
 
-// ---------------------------------------------------------------- colours (dark theme)
+// ---------------------------------------------------------------- colours (the current theme)
 
 // colours come from the theme (Theme.h), so the whole window matches
 static const QColor& kBg = Theme::Editor;
@@ -73,10 +73,11 @@ CodeView::CodeView(QWidget* parent) : QAbstractScrollArea(parent) {
     popup_ = new QListWidget(this);
     popup_->setFocusPolicy(Qt::NoFocus);
     popup_->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-    popup_->setStyleSheet(
-        "QListWidget{background:#252526;color:#d4d4d4;border:1px solid #3a3a3a;border-radius:6px;outline:0;padding:3px;}"
-        "QListWidget::item{padding:3px 8px;border-radius:4px;}"
-        "QListWidget::item:selected{background:#233a5e;color:#ffffff;}");
+    popup_->setStyleSheet(Theme::popupListStyle());
+    connect(&Theme::notifier(), &Theme::Notifier::changed, this, [this]() {       // theme or accent changed: restyle and repaint
+        popup_->setStyleSheet(Theme::popupListStyle());
+        viewport()->update();
+    });
     popup_->hide();
     connect(popup_, &QListWidget::itemClicked, this, [this]() { acceptCompletion(); });
 
@@ -738,7 +739,7 @@ void CodeView::paintEvent(QPaintEvent*) {
             int b = displayCol(raw, std::min(raw.size(), q.col + q.len));
             if (b <= a) b = a + 1;
             const int x0 = left + a * charW_, x1 = left + b * charW_, base = y + lineH_ - 2;
-            p.setPen(QPen(q.sev == 0 ? QColor(0xf1, 0x4c, 0x4c) : QColor(0xcc, 0xa7, 0x00), 1));
+            p.setPen(QPen(q.sev == 0 ? Theme::Error : Theme::Warning, 1));
             QPolygon zig;
             bool up = false;
             for (int x = x0; x <= x1; x += 2) { zig << QPoint(x, up ? base - 2 : base); up = !up; }
@@ -751,7 +752,7 @@ void CodeView::paintEvent(QPaintEvent*) {
                 if (pts[k]->line != l) continue;
                 const int bx = left + displayCol(raw, pts[k]->col) * charW_;
                 p.fillRect(bx, y, charW_, lineH_, QColor(0x88, 0x88, 0x88, 70));
-                p.setPen(QColor(0xaa, 0xaa, 0xaa));
+                p.setPen(Theme::Muted);
                 p.drawRect(bx, y, charW_ - 1, lineH_ - 1);
             }
         }
@@ -778,7 +779,7 @@ void CodeView::paintEvent(QPaintEvent*) {
         p.setRenderHint(QPainter::Antialiasing, true);
         p.setPen(Qt::NoPen);
         for (int sev = 1; sev >= 0; --sev) {            // warnings first, so an error on the same line wins
-            p.setBrush(sev == 0 ? QColor(0xf1, 0x4c, 0x4c) : QColor(0xcc, 0xa7, 0x00));
+            p.setBrush(sev == 0 ? Theme::Error : Theme::Warning);
             for (const Squig& q : squigs)
                 if (q.sev == sev && q.line >= first && q.line < last)
                     p.drawEllipse(QRectF(3, static_cast<int>(q.line - first) * lineH_ + (lineH_ - 7) / 2.0, 7, 7));

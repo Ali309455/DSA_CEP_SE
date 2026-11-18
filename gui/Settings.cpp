@@ -2,11 +2,12 @@
 
 #include <QSettings>
 #include <algorithm>
+#include "Theme.h"
 
 bool AppSettings::Values::operator==(const Values& o) const {
     return fontSize == o.fontSize && fontFamily == o.fontFamily && tabWidth == o.tabWidth && autoPairs == o.autoPairs &&
            wrapSelection == o.wrapSelection && autoComplete == o.autoComplete && cursorStyle == o.cursorStyle &&
-           cursorBlink == o.cursorBlink && accent == o.accent && lineNumbers == o.lineNumbers &&
+           cursorBlink == o.cursorBlink && theme == o.theme && accent == o.accent && lineNumbers == o.lineNumbers &&
            indentGuides == o.indentGuides && highlightLine == o.highlightLine && matchBrackets == o.matchBrackets &&
            statusBar == o.statusBar && terminalFontSize == o.terminalFontSize && terminalShell == o.terminalShell &&
            terminalScrollback == o.terminalScrollback && restoreSession == o.restoreSession;
@@ -37,6 +38,7 @@ AppSettings::Values AppSettings::sanitized(Values v) {
     bool known = false;
     for (const Accent& a : kAccents) known = known || v.accent == QLatin1String(a.key);
     if (!known) v.accent = QStringLiteral("blue");
+    if (!Theme::isKnownScheme(v.theme)) v.theme = Theme::defaultScheme();
     v.fontFamily = v.fontFamily.trimmed();
     v.terminalShell = v.terminalShell.trimmed();
     return v;
@@ -67,6 +69,7 @@ void AppSettings::load() {
     v.autoComplete = s.value("autoComplete", d.autoComplete).toBool();
     v.cursorStyle = s.value("cursorStyle", d.cursorStyle).toInt();
     v.cursorBlink = s.value("cursorBlink", d.cursorBlink).toBool();
+    v.theme = s.value("theme", d.theme).toString();
     v.accent = s.value("accent", d.accent).toString();
     v.lineNumbers = s.value("lineNumbers", d.lineNumbers).toBool();
     v.indentGuides = s.value("indentGuides", d.indentGuides).toBool();
@@ -91,6 +94,7 @@ void AppSettings::save() const {
     s.setValue("autoComplete", v_.autoComplete);
     s.setValue("cursorStyle", v_.cursorStyle);
     s.setValue("cursorBlink", v_.cursorBlink);
+    s.setValue("theme", v_.theme);
     s.setValue("accent", v_.accent);
     s.setValue("lineNumbers", v_.lineNumbers);
     s.setValue("indentGuides", v_.indentGuides);

@@ -26,14 +26,14 @@ void Switch::paintEvent(QPaintEvent*) {
     p.setRenderHint(QPainter::Antialiasing);
     const QRectF r(1, 1, width() - 2, height() - 2);
     const bool on = isChecked();
-    QColor track = on ? Theme::Accent : QColor(0x3a, 0x3a, 0x3a);
+    QColor track = on ? Theme::Accent : Theme::isDark() ? Theme::InputBorder : QColor(0xb4, 0xbb, 0xc4);
     if (!isEnabled()) track.setAlphaF(0.4);
     p.setPen(Qt::NoPen);
     p.setBrush(track);
     p.drawRoundedRect(r, r.height() / 2, r.height() / 2);
     const qreal d = r.height() - 6;
     const qreal x = on ? r.right() - 3 - d : r.left() + 3;
-    p.setBrush(on ? QColor(Qt::white) : QColor(0xc8, 0xc8, 0xc8));
+    p.setBrush(on || !Theme::isDark() ? QColor(Qt::white) : QColor(0xc8, 0xc8, 0xc8));
     p.drawEllipse(QRectF(x, r.top() + 3, d, d));
     if (hasFocus()) {
         p.setBrush(Qt::NoBrush);
@@ -238,7 +238,7 @@ void Combo::paintEvent(QPaintEvent* e) {
     QComboBox::paintEvent(e);
     QPainter p(this);
     p.setRenderHint(QPainter::Antialiasing);
-    QPen pen(QColor(0x9d, 0x9d, 0x9d), 1.6);
+    QPen pen(Theme::Muted, 1.6);
     pen.setCapStyle(Qt::RoundCap);
     pen.setJoinStyle(Qt::RoundJoin);
     p.setPen(pen);

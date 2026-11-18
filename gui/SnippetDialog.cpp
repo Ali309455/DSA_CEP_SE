@@ -1,4 +1,5 @@
 #include "SnippetDialog.h"
+#include "Theme.h"
 
 #include <QFileDialog>
 #include <QFontDatabase>
@@ -99,7 +100,7 @@ void SnippetDialog::pick() {
 void SnippetDialog::saved(const QString& selectTrigger) {
     QString err;
     if (!SnippetStore::instance().save(&err)) {
-        message_->setStyleSheet("color:#e5534b;");
+        message_->setStyleSheet(QString("color:%1;").arg(Theme::Error.name()));
         message_->setText("Changed, but the snippets file could not be saved: " + err);
     }
     SnippetStore::instance().notifyChanged();
@@ -112,11 +113,11 @@ void SnippetDialog::addOrUpdate() {
     const QString trig = trigger_->text().trimmed();
     try {
         const bool fresh = SnippetStore::instance().table().add(toStd(trig), toStd(body));
-        message_->setStyleSheet("color:#73c991;");
+        message_->setStyleSheet(QString("color:%1;").arg(Theme::Success.name()));
         message_->setText(fresh ? "Added \"" + trig + "\"." : "Updated \"" + trig + "\".");
         saved(trig);
     } catch (const std::exception& ex) {                       // bad trigger / body, too many snippets
-        message_->setStyleSheet("color:#e5534b;");
+        message_->setStyleSheet(QString("color:%1;").arg(Theme::Error.name()));
         message_->setText(QString::fromUtf8(ex.what()));
     }
 }
@@ -124,7 +125,7 @@ void SnippetDialog::addOrUpdate() {
 void SnippetDialog::removeSelected() {
     QListWidgetItem* it = list_->currentItem();
     if (!it) {
-        message_->setStyleSheet("color:#e5534b;");
+        message_->setStyleSheet(QString("color:%1;").arg(Theme::Error.name()));
         message_->setText("Select a snippet first.");
         return;
     }
@@ -132,7 +133,7 @@ void SnippetDialog::removeSelected() {
     SnippetStore::instance().table().remove(toStd(name));
     trigger_->clear();
     body_->clear();
-    message_->setStyleSheet("color:#73c991;");
+    message_->setStyleSheet(QString("color:%1;").arg(Theme::Success.name()));
     message_->setText("Removed \"" + name + "\".");
     saved(QString());
 }
@@ -141,7 +142,7 @@ void SnippetDialog::importFile() {
     const QString p = QFileDialog::getOpenFileName(this, "Import snippets");
     if (p.isEmpty()) return;
     const IOResult r = SnippetStore::instance().table().loadFromFile(toStd(p));
-    message_->setStyleSheet(r.ok ? "color:#73c991;" : "color:#e5534b;");
+    message_->setStyleSheet(QString("color:%1;").arg((r.ok ? Theme::Success : Theme::Error).name()));
     message_->setText(fromStd(r.message));
     saved(QString());
 }
@@ -150,7 +151,7 @@ void SnippetDialog::exportFile() {
     const QString p = QFileDialog::getSaveFileName(this, "Export snippets", "snippets.txt");
     if (p.isEmpty()) return;
     const IOResult r = SnippetStore::instance().table().saveToFile(toStd(p));
-    message_->setStyleSheet(r.ok ? "color:#73c991;" : "color:#e5534b;");
+    message_->setStyleSheet(QString("color:%1;").arg((r.ok ? Theme::Success : Theme::Error).name()));
     message_->setText(fromStd(r.message));
 }
 
@@ -161,7 +162,7 @@ void SnippetDialog::resetDefaults() {
     SnippetStore::instance().resetToDefaults();
     trigger_->clear();
     body_->clear();
-    message_->setStyleSheet("color:#73c991;");
+    message_->setStyleSheet(QString("color:%1;").arg(Theme::Success.name()));
     message_->setText("Built-in snippets restored.");
     reload();
 }

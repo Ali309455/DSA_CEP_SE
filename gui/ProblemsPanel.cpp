@@ -53,7 +53,7 @@ ProblemsPanel::ProblemsPanel(QWidget* parent) : QWidget(parent) {
     status_->setObjectName("terminalCwd");
     status_->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
     QToolButton* close = new QToolButton(head);
-    close->setIcon(Icons::get(Icons::Close, QColor(0x9d, 0x9d, 0x9d), QColor(0xff, 0xff, 0xff)));
+    close->setIcon(Icons::get(Icons::Close));
     close->setIconSize(QSize(16, 16));
     close->setFixedSize(26, 26);
     close->setToolTip("Hide panel");
@@ -74,7 +74,7 @@ ProblemsPanel::ProblemsPanel(QWidget* parent) : QWidget(parent) {
     tree_->setEditTriggers(QAbstractItemView::NoEditTriggers);
     tree_->setSelectionMode(QAbstractItemView::SingleSelection);
     tree_->setIconSize(QSize(14, 14));
-    tree_->setStyleSheet(QString("QTreeWidget { background: %1; }").arg(Theme::Editor.name()));
+    tree_->setObjectName("problemsTree");
     tree_->header()->setStretchLastSection(false);
     tree_->header()->setSectionResizeMode(0, QHeaderView::Stretch);
     tree_->header()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
@@ -101,8 +101,8 @@ void ProblemsPanel::setProblems(const std::vector<Diagnostic>& listIn, const QSt
     const QString keepSelection = tree_->currentItem() ? tree_->currentItem()->text(0) : QString();
     tree_->clear();
     errors_ = warnings_ = 0;
-    const QIcon errIcon = dotIcon(QColor(0xf1, 0x4c, 0x4c));
-    const QIcon warnIcon = dotIcon(QColor(0xcc, 0xa7, 0x00));
+    const QIcon errIcon = dotIcon(Theme::Error);
+    const QIcon warnIcon = dotIcon(Theme::Warning);
     for (const Diagnostic& d : list) {
         const bool isError = d.severity == Severity::Error;
         (isError ? errors_ : warnings_)++;
