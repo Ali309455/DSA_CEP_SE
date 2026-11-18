@@ -27,6 +27,7 @@
 #include <QStandardPaths>
 #include <QTextCursor>
 #include <QPixmap>
+#include <QSet>
 #include <cmath>
 #include "Controls.h"
 #include "Runner.h"
@@ -752,7 +753,7 @@ static void testThemes() {
     S.resetToDefaults();
     MainWindow w;
     w.show();
-    CHECK(Theme::schemeCount() == 4 && Theme::currentScheme() == "midnight" && Theme::isDark());
+    CHECK(Theme::schemeCount() == 12 && Theme::currentScheme() == "midnight" && Theme::isDark());
     CHECK(Theme::Editor == QColor(0x1f, 0x1f, 0x1f));
 
     // a theme change is a settings change: colours, style sheet and the stored value all follow
@@ -770,6 +771,23 @@ static void testThemes() {
         CHECK(Theme::currentScheme() == id && S.values().theme == id);
         CHECK(std::abs(Theme::Syntax[0].lightness() - Theme::Editor.lightness()) > 90);
         CHECK(Theme::isDark() == (Theme::Editor.lightness() < 128));
+    }
+
+    // each theme has its own syntax colours (not just the chrome)
+    QSet<QRgb> keywordColours;
+    for (const QString& id : Theme::schemeIds()) {
+        w.setTheme(id);
+        keywordColours.insert(Theme::Syntax[1].rgb());
+    }
+    CHECK(keywordColours.size() >= 9);
+    // every theme toggles to a partner of the other kind and back
+    for (const QString& id : Theme::schemeIds()) {
+        w.setTheme(id);
+        const bool wasDark = Theme::isDark();
+        w.toggleTheme();
+        CHECK(Theme::isDark() != wasDark);
+        w.toggleTheme();
+        CHECK(Theme::currentScheme() == id);
     }
 
     // the quick toggle switches light <-> dark and is its own inverse
@@ -1132,11 +1150,55 @@ static void testSnippetsInEditor() {
     SnippetStore::instance().table().remove("mysnip");
     SnippetStore::instance().resetToDefaults();
 
-    // the Snippets window lists the table
+    // the Snippets window lists the table and adds, edits, renames, duplicates and deletes snippets
+    SnippetTable& T = SnippetStore::instance().table();
     SnippetDialog d;
     d.show();
-    CHECK(d.isVisible());
+    CHECK(d.isVisible() && d.shownTriggers().contains("for") && !d.isDirty());
+    CHECK(d.shownTriggers().size() == static_cast<int>(T.size()));
+
+    d.startNew();                                            // add
+    CHECK(d.current().isEmpty() && !d.isDirty());
+    d.setFields("hello_t", "Hello $0!\n");
+    CHECK(d.isDirty());
+    CHECK(d.save() && !d.isDirty() && d.current() == "hello_t" && d.shownTriggers().contains("hello_t"));
+    CHECK(T.find("hello_t") && T.find("hello_t")->body == "Hello $0!\n");
+
+    d.setFields("hello_t", "Hi $0");                         // edit the body
+    CHECK(d.isDirty() && d.save() && T.find("hello_t")->body == "Hi $0");
+
+    d.setFields("hello2", "Hi $0");                          // rename: the old trigger goes away
+    CHECK(d.save() && !T.find("hello_t") && T.find("hello2") && d.current() == "hello2");
+    CHECK(!d.shownTriggers().contains("hello_t") && d.shownTriggers().contains("hello2"));
+
+    d.setFields("hello2", "changed");                        // revert
+    CHECK(d.isDirty());
+    d.revert();
+    CHECK(!d.isDirty() && T.find("hello2")->body == "Hi $0");
+
+    d.duplicateCurrent();                                    // duplicate: a new unsaved copy
+    CHECK(d.isDirty() && d.current().isEmpty());
+    CHECK(d.save() && d.current() == "hello2_copy" && T.find("hello2_copy")->body == "Hi $0");
+
+    d.startNew();                                            // a trigger that exists / is not valid is refused
+    d.setFields("for", "x");
+    CHECK(!d.save() && !d.message().isEmpty() && T.find("for")->body != "x");
+    d.setFields("bad name", "x");
+    CHECK(!d.save() && !T.find("bad name"));
+    d.revert();
+    CHECK(!d.isDirty());
+
+    d.setFilter("hello2");                                   // search
+    CHECK(d.shownTriggers() == QStringList({"hello2", "hello2_copy"}));
+    d.setFilter(QString());
+    CHECK(d.shownTriggers().size() == static_cast<int>(T.size()));
+
+    CHECK(d.select("hello2_copy") && d.deleteCurrent(false)); // delete
+    CHECK(!T.find("hello2_copy") && !d.shownTriggers().contains("hello2_copy"));
+    CHECK(d.select("hello2") && d.deleteCurrent(false) && !T.find("hello2"));
+    CHECK(!d.select("no_such_snippet"));
     d.close();
+    SnippetStore::instance().resetToDefaults();
 }
 
 static void testProblemsPanel() {

@@ -1,10 +1,8 @@
 // Theme.h - DevPad's look: one palette for every widget, the style sheet and the fonts.
 //
-// Four built-in themes (the ones the first DevPad versions had):
-//   Midnight        the dark "modern" theme: neutral chrome (#181818) around a slightly lighter editor
-//   Daylight        light, GitHub-like
-//   Nord            dark blue-grey
-//   Solarized Light warm light
+// Twelve built-in themes, each with its own syntax colours, as six light / dark pairs:
+//   Midnight (the default) <-> Daylight      Nord <-> Solarized Light     Dracula <-> Alucard
+//   Monokai <-> Paper                        Gruvbox Dark <-> Gruvbox Light     Tokyo Night <-> One Light
 // The colours below are plain variables that setScheme() overwrites, so every widget that reads
 // them (CodeView paints with them, the style sheet is built from them) follows a theme change.
 // The accent colour is separate (Settings > Appearance > Accent colour) and works with every theme.
@@ -66,7 +64,7 @@ inline QColor IconActive(0xe8, 0xe8, 0xe8);    // ... hovered or checked
 
 // ---- the themes ----
 struct SchemeInfo {
-    QString id;       // what is stored in the settings ("midnight", "daylight", "nord", "solarized-light")
+    QString id;       // what is stored in the settings ("midnight", "daylight", "nord", "gruvbox-dark", ...)
     QString name;     // what the user sees
     bool dark;
 };
@@ -78,7 +76,7 @@ QString schemeName(const QString& id);
 QString defaultScheme();                       // "midnight"
 QString currentScheme();                       // id of the theme in use
 bool isDark();                                 // is the theme in use a dark one?
-// The theme the quick toggle switches to: Midnight <-> Daylight, Nord <-> Solarized Light.
+// The theme the quick toggle switches to: the light / dark partner (Midnight <-> Daylight, Nord <-> Solarized Light, ...).
 QString toggledScheme(const QString& id);
 // Use a theme: sets every colour above, rebuilds the application style sheet if it is already in place
 // and tells notifier() listeners. An unknown id means Midnight.

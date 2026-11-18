@@ -146,7 +146,7 @@ private:
     void showBottom(QWidget* page);
     void hideBottom();
     void syncBottomActions();
-    void scheduleCheck(int delayMs = 900);
+    void scheduleCheck(int delayMs = 350);        // wait this long after the last edit, then run the compiler check
     void refreshProblems();
     void jumpToProblem(const QString& file, int line, int col);
     void onCheckFinished(const QString& path, quint64 token, const std::vector<Diagnostic>& diags, const QString& message);

@@ -21,7 +21,7 @@ public:
         int cursorStyle = 0;               // 0 line, 1 block, 2 underline
         bool cursorBlink = true;
         // appearance
-        QString theme = "midnight";        // Theme::schemeIds(): midnight, daylight, nord, solarized-light
+        QString theme = "midnight";        // one of Theme::schemeIds()
         QString accent = "blue";           // key into accentColor()
         bool lineNumbers = true;
         bool indentGuides = true;

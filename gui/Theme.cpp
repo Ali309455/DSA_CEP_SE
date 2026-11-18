@@ -1,6 +1,7 @@
 #include "Theme.h"
 
 #include <QApplication>
+#include <QWidget>
 #include <algorithm>
 #include "Settings.h"
 #include <QFontDatabase>
@@ -93,6 +94,70 @@ const Scheme kSchemes[] = {
      0xf5eedc, 0xc9d8e0, 0xf5e9a0, 0x93a1a1, 0x073642, 0xe6dfca,
      {0x586e75, 0x859900, 0xb58900, 0x2aa198, 0xd33682, 0x93a1a1, 0x6c71c4},
      0xdc322f, 0xb58900, 0x859900, 0x657b83, 0x073642},
+
+    // Dracula: dark purple-grey, pink / cyan / green syntax
+    {"dracula", "Dracula", true,
+     0x21222c, 0x282a36, 0x343746, 0x191a21, 0xf8f8f2, 0x9ea1b8, 0x6272a4, 0xf8f8f2,
+     0x2b2d3a, 0x3a3d4f, 0x44475a, 0x21222c, 0x44475a, 0x343746, 0x3d4054, 0x343746, 0x44475a, 0x343746, 0x565a73, 0x2f3140,
+     0x2f3142, 0x44475a, 0x6b5a1f, 0x6272a4, 0xf8f8f2, 0x3a3d4f,
+     {0xf8f8f2, 0xff79c6, 0x8be9fd, 0xf1fa8c, 0xbd93f9, 0x6272a4, 0x50fa7b},
+     0xff5555, 0xf1fa8c, 0x50fa7b, 0x9ea1b8, 0xf8f8f2},
+
+    // Alucard: Dracula's light sibling
+    {"alucard", "Alucard", false,
+     0xf5f0dc, 0xfffbeb, 0xfffdf5, 0xe4dec6, 0x1f1f1f, 0x6c664b, 0x9a9478, 0x1f1f1f,
+     0xf8f3df, 0xe4dec6, 0xd6cfb2, 0xfffbeb, 0xd6cfb2, 0xece6cf, 0xe2dbc0, 0xf3eed8, 0xe9e3c9, 0xefe9d2, 0xcfc8aa, 0xefe9d4,
+     0xf4efd9, 0xcfcfea, 0xffe48a, 0x9a9478, 0x1f1f1f, 0xe8e2cc,
+     {0x1f1f1f, 0xa3144d, 0x036a96, 0x846e15, 0x644ac9, 0x6c664b, 0x14710a},
+     0xcb3a2a, 0x846e15, 0x14710a, 0x6c664b, 0x1f1f1f},
+
+    // Monokai: dark olive-grey, pink / cyan / yellow syntax
+    {"monokai", "Monokai", true,
+     0x1e1f1c, 0x272822, 0x3e3d32, 0x1e1f1c, 0xf8f8f2, 0xa6a69c, 0x75715e, 0xf8f8f2,
+     0x2d2e27, 0x3e3d32, 0x49483e, 0x1e1f1c, 0x49483e, 0x34352d, 0x3e3d32, 0x34352d, 0x3e3d32, 0x3e3d32, 0x5b5a4d, 0x2f302a,
+     0x3e3d32, 0x49483e, 0x665c1a, 0x8f908a, 0xf8f8f2, 0x3b3c35,
+     {0xf8f8f2, 0xf92672, 0x66d9ef, 0xe6db74, 0xae81ff, 0x75715e, 0xa6e22e},
+     0xf92672, 0xe6db74, 0xa6e22e, 0xa6a69c, 0xf8f8f2},
+
+    // Paper: warm off-white, calm colours
+    {"paper", "Paper", false,
+     0xebe8e0, 0xf7f5f0, 0xfcfbf8, 0xdcd8cd, 0x2b2b2b, 0x66635a, 0x9a968a, 0x111111,
+     0xf1eee7, 0xdcd8cd, 0xcdc8bb, 0xfcfbf8, 0xcdc8bb, 0xe4e0d5, 0xd9d4c7, 0xece9e0, 0xe2ded3, 0xe8e4da, 0xc4bfb1, 0xe8e5dc,
+     0xefece3, 0xcfdcf0, 0xffe08a, 0x9a968a, 0x111111, 0xe2ded3,
+     {0x2b2b2b, 0xc2255c, 0x0b6e99, 0x2f7d32, 0xc05621, 0x8a8678, 0x7048b8},
+     0xc0392b, 0x9a6700, 0x2f7d32, 0x66635a, 0x111111},
+
+    // Gruvbox Dark: warm retro dark
+    {"gruvbox-dark", "Gruvbox Dark", true,
+     0x1d2021, 0x282828, 0x3c3836, 0x32302f, 0xebdbb2, 0xa89984, 0x7c6f64, 0xfbf1c7,
+     0x32302f, 0x3c3836, 0x504945, 0x1d2021, 0x504945, 0x3c3836, 0x504945, 0x3c3836, 0x504945, 0x3c3836, 0x665c54, 0x32302f,
+     0x32302f, 0x504945, 0x6b5a1c, 0x7c6f64, 0xebdbb2, 0x3c3836,
+     {0xebdbb2, 0xfb4934, 0xfabd2f, 0xb8bb26, 0xd3869b, 0x928374, 0x8ec07c},
+     0xfb4934, 0xfabd2f, 0xb8bb26, 0xa89984, 0xfbf1c7},
+
+    // Gruvbox Light
+    {"gruvbox-light", "Gruvbox Light", false,
+     0xebdbb2, 0xfbf1c7, 0xf9f5d7, 0xd5c4a1, 0x3c3836, 0x665c54, 0x928374, 0x282828,
+     0xf2e5bc, 0xd5c4a1, 0xbdae93, 0xfbf1c7, 0xbdae93, 0xe3d3a6, 0xd9c898, 0xebdbb2, 0xe0d0a4, 0xebdbb2, 0xbdae93, 0xeadcae,
+     0xf2e5bc, 0xd5c4a1, 0xf5d76e, 0xa89984, 0x3c3836, 0xe6d9ae,
+     {0x3c3836, 0x9d0006, 0xb57614, 0x79740e, 0x8f3f71, 0x928374, 0x427b58},
+     0x9d0006, 0xb57614, 0x79740e, 0x665c54, 0x282828},
+
+    // Tokyo Night: deep blue, violet / cyan / green syntax
+    {"tokyo-night", "Tokyo Night", true,
+     0x16161e, 0x1a1b26, 0x24283b, 0x101014, 0xc0caf5, 0x9aa5ce, 0x565f89, 0xc8d3f5,
+     0x1f2335, 0x292e42, 0x3b4261, 0x16161e, 0x3b4261, 0x292e42, 0x343a55, 0x24283b, 0x2f3550, 0x292e42, 0x414868, 0x202335,
+     0x202337, 0x33467c, 0x5c4a1e, 0x3b4261, 0xa9b1d6, 0x292e42,
+     {0xc0caf5, 0xbb9af7, 0x2ac3de, 0x9ece6a, 0xff9e64, 0x565f89, 0x7dcfff},
+     0xf7768e, 0xe0af68, 0x9ece6a, 0x9aa5ce, 0xc0caf5},
+
+    // One Light: Atom's light theme
+    {"one-light", "One Light", false,
+     0xeaeaeb, 0xfafafa, 0xffffff, 0xdbdbdc, 0x383a42, 0x696c77, 0xa0a1a7, 0x232324,
+     0xf0f0f1, 0xdbdbdc, 0xcfcfd1, 0xffffff, 0xcfcfd1, 0xe5e5e6, 0xd9d9db, 0xf0f0f1, 0xe5e5e6, 0xebebec, 0xc8c8ca, 0xe8e8e9,
+     0xf0f0f1, 0xcfe0f7, 0xffe9a0, 0xa0a1a7, 0x383a42, 0xe5e5e6,
+     {0x383a42, 0xa626a4, 0xc18401, 0x50a14f, 0x986801, 0xa0a1a7, 0x0184bc},
+     0xe45649, 0xc18401, 0x50a14f, 0x696c77, 0x232324},
 };
 const int kSchemeCount = static_cast<int>(sizeof(kSchemes) / sizeof(kSchemes[0]));
 
@@ -160,8 +225,14 @@ void applyPalette() {
 void restyle() {
     if (!qApp) return;
     if (!qApp->styleSheet().isEmpty()) {
+        // repaint once at the end instead of after every widget that gets the new style sheet
+        const QWidgetList tops = QApplication::topLevelWidgets();
+        for (QWidget* w : tops) w->setUpdatesEnabled(false);
         applyPalette();
         qApp->setStyleSheet(styleSheet());
+        notifier().changed();
+        for (QWidget* w : tops) w->setUpdatesEnabled(true);
+        return;
     }
     notifier().changed();
 }
@@ -200,11 +271,14 @@ QString currentScheme() { return g_current; }
 bool isDark() { return g_dark; }
 
 QString toggledScheme(const QString& id) {
-    if (id == QLatin1String("midnight")) return QStringLiteral("daylight");
-    if (id == QLatin1String("daylight")) return QStringLiteral("midnight");
-    if (id == QLatin1String("nord")) return QStringLiteral("solarized-light");
-    if (id == QLatin1String("solarized-light")) return QStringLiteral("nord");
-    return QStringLiteral("midnight");
+    // light <-> dark partners; every theme has one, and toggling twice comes back
+    static const char* const pairs[][2] = {{"midnight", "daylight"},     {"nord", "solarized-light"},   {"dracula", "alucard"},
+                                           {"monokai", "paper"},         {"gruvbox-dark", "gruvbox-light"}, {"tokyo-night", "one-light"}};
+    for (const auto& p : pairs) {
+        if (id == QLatin1String(p[0])) return QString::fromLatin1(p[1]);
+        if (id == QLatin1String(p[1])) return QString::fromLatin1(p[0]);
+    }
+    return defaultScheme();
 }
 
 Notifier& notifier() {
@@ -304,6 +378,17 @@ QListWidget#settingsNav::item:selected { background: @acc12@; color: @heading@; 
 #keyOr { color: @dim@; font-size: 11px; background: transparent; }
 #keyPlus { color: @dim@; font-size: 11px; background: transparent; }
 #shortcutsFooter { background: @chrome@; border-top: 1px solid @border@; }
+
+/* ---- snippets window ---- */
+#snippetDialog { background: @editor@; }
+QListWidget#snippetList { background: @raised@; border: 1px solid @cardBorder@; border-radius: 10px; padding: 4px; }
+QListWidget#snippetList::item { padding: 6px 8px; border-radius: 6px; }
+QPlainTextEdit#snippetBody { background: @surface@; color: @code@; border: 1px solid @inputBorder@; border-radius: 6px; padding: 6px;
+                              selection-background-color: @selection@; }
+QPlainTextEdit#snippetBody:focus { border: 1px solid @accent@; }
+#snippetHeading { color: @heading@; font-size: 15px; font-weight: 600; }
+#snippetHint, #snippetStats { color: @dim@; font-size: 12px; }
+QPushButton:disabled { color: @dim@; background: @button@; border-color: @cardBorder@; }
 
 /* ---- problems panel ---- */
 QTreeWidget#problemsTree { background: @editor@; }

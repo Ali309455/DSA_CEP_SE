@@ -64,7 +64,7 @@ CodeView::CodeView(QWidget* parent) : QAbstractScrollArea(parent) {
     bracketTimer_.setSingleShot(true);
     connect(&bracketTimer_, &QTimer::timeout, this, [this]() { recomputeBrackets(); });
     autoTimer_.setSingleShot(true);
-    autoTimer_.setInterval(180);
+    autoTimer_.setInterval(70);
     connect(&autoTimer_, &QTimer::timeout, this, [this]() { showCompletions(); });
 
     connect(verticalScrollBar(), &QScrollBar::valueChanged, this, [this]() { viewport()->update(); hidePopup(); });
@@ -513,7 +513,7 @@ void CodeView::edited(size_t fromLine) {
     ++revision_;
     shiftDiagnostics(fromLine, ed_.doc().lineCount());
     dirtyBrackets_ = true;
-    bracketTimer_.start(250);
+    bracketTimer_.start(80);
     blockValid_ = std::min(blockValid_, fromLine + 1);
     wantCol_ = displayColumn(cur_);
     updateGutter();

@@ -74,7 +74,7 @@ gui/SnippetStore.*      the shared snippet table + snippets.txt in the app confi
 engine/Diagnostics.*    compiler-output parser, bracket issues as diagnostics, squiggle length, syntax-check runner
 engine/HashTable.h, Snippets.*  snippet hash table (chaining), `$0` cursor marker, save / load
 gui/Runner.h/cpp        what F5 runs for each file type
-gui/Theme.h/cpp         the themes (Midnight, Daylight, Nord, Solarized Light): palettes, style sheet, UI and code fonts (one place for every colour)
+gui/Theme.h/cpp         the 12 themes (Midnight, Daylight, Nord, Dracula, Monokai, Gruvbox, Tokyo Night, ...): palettes, style sheet, UI and code fonts (one place for every colour)
 gui/Icons.h/cpp         all icons, drawn in code: line icons, file-type badges, folders, the app icon
 gui/WinTheme.h/cpp      dark / light title bars on Windows 10 / 11 (dwmapi), following the theme
 gui/devpad.ico, devpad.rc.in   the program icon for devpad.exe
@@ -268,13 +268,14 @@ key presses into engine calls.
 
 ### Look
 
-DevPad has four themes (`Theme.h`): **Midnight** (the default dark look: neutral chrome around a slightly lighter
-editor), **Daylight** (light), **Nord** (dark blue-grey) and **Solarized Light**. Pick one in
-Settings > Appearance > Theme or in View > Theme; `Ctrl+Shift+L` (or the theme button in the status bar) switches
-between light and dark (Midnight <-> Daylight, Nord <-> Solarized Light). The choice is remembered and applies
-at once to the editor, the syntax colours, the sidebar, the terminal, the dialogs and the Windows title bar. The
-accent colour (blue by default) is chosen separately and works with every theme. Every theme has rounded inputs
-and menus and thin scroll bars. Every
+DevPad has 12 themes (`Theme.h`), each with its own syntax colours: **Midnight** (the default dark look),
+**Daylight**, **Nord**, **Solarized Light**, **Dracula**, **Alucard**, **Monokai**, **Paper**, **Gruvbox Dark**,
+**Gruvbox Light**, **Tokyo Night** and **One Light**. Pick one in Settings > Appearance > Theme or in View > Theme;
+`Ctrl+Shift+L` (or the theme button in the status bar) switches between the light and dark partner
+(Midnight <-> Daylight, Nord <-> Solarized Light, Dracula <-> Alucard, Monokai <-> Paper, Gruvbox Dark <-> Gruvbox
+Light, Tokyo Night <-> One Light). The choice is remembered and applies at once to the editor, the syntax colours,
+the sidebar, the terminal, the dialogs and the Windows title bar. The accent colour (blue by default) is chosen
+separately and works with every theme. Every theme has rounded inputs and menus and thin scroll bars. Every
 icon is drawn in code by `Icons.h`, so there are no image files and icons stay sharp at any screen scale. The
 Explorer and the tabs show a coloured badge per file type. The activity bar on the far left has Explorer,
 Find, Go to File and Keyboard Shortcuts. Code uses Cascadia Code / Cascadia Mono when installed (Windows 11),
@@ -364,7 +365,8 @@ Type `help` inside the editor. Lines and columns start at 1.
 - **Snippets** live in our own chained hash table. `$0` in a body marks where the cursor lands, `$$` is a real
   dollar sign, and every line after the first gets the indentation of the line you expanded on. Console:
   `expand [line col]`, `snippet list|show|add|del|load|save|defaults|stats`. GUI: type the trigger and press
-  `Tab` (or `Ctrl+J`, Edit > Expand Snippet); Edit > Snippets... adds, edits, removes, imports and exports them.
+  `Tab` (or `Ctrl+J`, Edit > Expand Snippet); Edit > Manage Snippets... opens the Snippets window: search, New, Duplicate, Delete, edit the trigger or
+  the body and Save (renaming works too), plus import, export and reset to the built-ins.
   The GUI keeps the list in `snippets.txt` in the app config folder.
 - **Error checking** has two sources: the instant bracket checker (while typing) and the compiler
   (`g++ -fsyntax-only` on a temporary copy of the text, about 1 s after you stop typing, so unsaved edits are

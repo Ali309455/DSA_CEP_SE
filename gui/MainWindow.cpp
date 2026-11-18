@@ -575,7 +575,7 @@ void MainWindow::buildActions() {
     add(edit, "Toggle Line Comment", seq("Ctrl+/"), onView(&CodeView::toggleComment));
     add(edit, "Trigger Autocomplete", seq("Ctrl+Space"), onView(&CodeView::triggerAutocomplete));
     add(edit, "Expand Snippet", seq("Ctrl+J"), onView(&CodeView::expandSnippet));
-    add(edit, "Snippets…", {}, [this]() { editSnippets(); });
+    add(edit, "Manage Snippets…", {}, [this]() { editSnippets(); });
 
     QMenu* search = menuBar()->addMenu("&Search");
     add(search, "Find…", {QKeySequence::Find}, [this]() { showFind(false); });
@@ -948,7 +948,7 @@ void MainWindow::onTabChanged(int) {
     onViewStateChanged();
     if (findBar_->isVisible()) highlightAll();
     refreshProblems();
-    scheduleCheck(400);
+    scheduleCheck(150);
     v->setFocus();
 }
 

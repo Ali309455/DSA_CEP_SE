@@ -36,7 +36,7 @@ const QColor kAnsiLight[16] = {
     QColor(0x6e, 0x77, 0x81), QColor(0xd1, 0x24, 0x2f), QColor(0x2e, 0x9a, 0x4a), QColor(0xb0, 0x7d, 0x00),
     QColor(0x09, 0x69, 0xda), QColor(0x82, 0x50, 0xdf), QColor(0x1b, 0x8a, 0x9e), QColor(0x1f, 0x23, 0x28)};
 
-const QColor& ansi16(int i) { return (Theme::isDark() ? kAnsiDark : kAnsiLight)[std::max(0, std::min(15, i))]; }
+const QColor& ansi16(int i) { return (Theme::isDark() ? kAnsiDark : kAnsiLight)[i < 0 ? 0 : i > 15 ? 15 : i]; }
 
 QColor ansi256(int n) {
     if (n < 16) return ansi16(n);
