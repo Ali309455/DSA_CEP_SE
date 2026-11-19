@@ -6,7 +6,17 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <stdexcept>
 #include <string>
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>     // GetModuleFileNameA: where the .exe is
+#endif
 
 #include "Assist.h"
 #include "Brackets.h"
@@ -23,9 +33,10 @@ static void printHelp() {
         "Words in <angle brackets> are placeholders: type the value WITHOUT the < >.\n"
         "  File:\n"
         "    new                         start an empty document\n"
-        "    open <file>                 open an existing text file\n"
+        "    open <file>                 open an existing text file (a plain name is looked up in files/ first)\n"
         "    save                        save to the current file\n"
-        "    saveas <file>               save under a new name\n"
+        "    saveas <file>               save under a new name; a plain name is saved in the project's\n"
+        "                                files/ folder (created if needed), a full path is used as typed\n"
         "    quit                        exit\n"
         "  View:\n"
         "    show [from [to]]            show lines with numbers\n"
@@ -117,6 +128,72 @@ static std::string toLower(std::string s) {
     for (size_t i = 0; i < s.size(); ++i)
         if (s[i] >= 'A' && s[i] <= 'Z') s[i] = static_cast<char>(s[i] - 'A' + 'a');
     return s;
+}
+
+// ---------------------------------------------------------------- where files are saved
+// Plain file names (saveas notes.txt) go into a folder called "files" in the project root, not
+// into whatever folder the program happens to run from (usually build/). The project root is
+// found by walking up from the .exe to the folder that holds CMakeLists.txt and engine/; if the
+// .exe was copied somewhere else, "files" is created next to the .exe instead.
+
+static std::filesystem::path exeFolder() {
+    namespace fs = std::filesystem;
+    std::error_code ec;
+#ifdef _WIN32
+    char buf[4096];
+    DWORD len = GetModuleFileNameA(nullptr, buf, sizeof(buf));
+    if (len > 0 && len < sizeof(buf)) return fs::path(std::string(buf, len)).parent_path();
+#else
+    fs::path p = fs::read_symlink("/proc/self/exe", ec);
+    if (!ec) return p.parent_path();
+#endif
+    return fs::current_path(ec);
+}
+
+static const std::filesystem::path& filesFolder() {
+    namespace fs = std::filesystem;
+    static const fs::path folder = []() {
+        std::error_code ec;
+        const fs::path start = exeFolder();
+        for (fs::path p = start; !p.empty(); p = p.parent_path()) {
+            if (fs::exists(p / "CMakeLists.txt", ec) && fs::is_directory(p / "engine", ec)) return p / "files";
+            if (p == p.parent_path()) break;            // reached the drive root
+        }
+        return start / "files";
+    }();
+    return folder;
+}
+
+// For saving: a relative name is placed inside files/ (the folder is created if needed);
+// an absolute path is used as it is.
+static std::string pathForSave(const std::string& name) {
+    namespace fs = std::filesystem;
+    fs::path p(name);
+    if (p.is_absolute()) return name;
+    fs::path full = filesFolder() / p;
+    std::error_code ec;
+    fs::create_directories(full.parent_path(), ec);   // if this fails, saving reports the problem
+    return full.make_preferred().string();
+}
+
+// For opening: a relative name is looked up in files/ first, then in the current folder.
+static std::string pathForOpen(const std::string& name) {
+    namespace fs = std::filesystem;
+    fs::path p(name);
+    if (p.is_absolute()) return name;
+    std::error_code ec;
+    fs::path inFiles = filesFolder() / p;
+    if (fs::is_regular_file(inFiles, ec)) return inFiles.make_preferred().string();
+    return name;
+}
+
+// "Saved 'notes.txt' at: D:\...\files\notes.txt"
+static void printSaved(const std::string& path) {
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    fs::path full = fs::absolute(path, ec);
+    std::cout << "Saved '" << fs::path(path).filename().string() << "' at: "
+              << (ec ? path : full.make_preferred().string()) << "\n";
 }
 
 static bool ask(const std::string& question) {
@@ -260,7 +337,8 @@ static void snippetCommand(SnippetTable& sn, const std::string& args) {
         std::cout << "Removed \"" << a1 << "\" (" << sn.size() << " left).\n";
     } else if (sub == "load" || sub == "save") {
         if (!takeArg(args, i, a1) || takeArg(args, i, extra)) throw std::invalid_argument("Usage: snippet " + sub + " <file>");
-        IOResult r = (sub == "load") ? sn.loadFromFile(a1) : sn.saveToFile(a1);
+        const std::string path = (sub == "load") ? pathForOpen(a1) : pathForSave(a1);
+        IOResult r = (sub == "load") ? sn.loadFromFile(path) : sn.saveToFile(path);
         std::cout << (r.ok ? "" : "Error: ") << r.message << "\n";
     } else if (sub == "defaults") {
         if (takeArg(args, i, extra)) throw std::invalid_argument("Usage: snippet defaults");
@@ -335,16 +413,18 @@ static bool execute(Editor& ed, Autocomplete& ac, SnippetTable& sn, const std::s
     } else if (cmd == "open") {
         if (rest.empty()) throw std::invalid_argument("Usage: open <file>");
         if (!okToDiscard(doc)) return true;
-        IOResult r = ed.open(rest);
+        IOResult r = ed.open(pathForOpen(rest));
         std::cout << r.message;
         if (r.ok) std::cout << " (" << doc.lineCount() << " lines, " << doc.charCount() << " characters)";
         std::cout << "\n";
     } else if (cmd == "save") {
         if (doc.path().empty()) throw std::logic_error("This document has no filename yet. Use: saveas <file>");
-        std::cout << ed.save(doc.path()).message << "\n";
+        IOResult r = ed.save(doc.path());
+        if (r.ok) printSaved(doc.path()); else std::cout << r.message << "\n";
     } else if (cmd == "saveas") {
         if (rest.empty()) throw std::invalid_argument("Usage: saveas <file>");
-        std::cout << ed.save(rest).message << "\n";
+        IOResult r = ed.save(pathForSave(rest));
+        if (r.ok) printSaved(doc.path()); else std::cout << r.message << "\n";
     } else if (cmd == "info") {
         info(doc);
     } else if (cmd == "show") {
