@@ -208,7 +208,11 @@ void SettingsDialog::buildUi() {
                "history buffer");
 
     // ---- General ----
-    beginSection("General", "Starting up.");
+    beginSection("General", "Starting up and saving.");
+    addToggle("Auto save", "Save modified files by themselves after you stop typing. Only files that already have a name are saved. Off by default.",
+              &AppSettings::Values::autoSave, "autosave save automatically backup");
+    addStepper("Auto save delay", "How long to wait after the last change before saving (used when Auto save is on).",
+               &AppSettings::Values::autoSaveDelay, 1, 300, 1, " s", "autosave seconds wait interval");
     addToggle("Reopen last session", "Open the files and folder you had open when DevPad was closed.", &AppSettings::Values::restoreSession,
               "restore startup");
 

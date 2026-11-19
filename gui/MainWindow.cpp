@@ -165,6 +165,9 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     checkTimer_ = new QTimer(this);
     checkTimer_->setSingleShot(true);
     connect(checkTimer_, &QTimer::timeout, this, &MainWindow::checkNow);
+    autoSaveTimer_ = new QTimer(this);
+    autoSaveTimer_->setSingleShot(true);
+    connect(autoSaveTimer_, &QTimer::timeout, this, [this]() { autoSaveNow(); });
 
     // sidebar: file manager
     explorer_ = new FileExplorer(this);
@@ -180,6 +183,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
         }
         return n;
     };
+    connect(explorer_, &FileExplorer::closeRequested, this, [this]() { dock_->hide(); });
     dock_ = new QDockWidget("Explorer", this);
     dock_->setObjectName("explorerDock");
     dock_->setWidget(explorer_);
@@ -188,6 +192,38 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     dock_->setMinimumWidth(170);
     addDockWidget(Qt::LeftDockWidgetArea, dock_);
     resizeDocks({dock_}, {250}, Qt::Horizontal);
+
+    // run / stop buttons in the top right corner of the tab strip
+    {
+        QWidget* corner = new QWidget(tabs_);
+        QHBoxLayout* cl = new QHBoxLayout(corner);
+        cl->setContentsMargins(4, 0, 6, 0);
+        cl->setSpacing(2);
+        runBtn_ = new QToolButton(corner);
+        runBtn_->setObjectName("runButton");
+        runBtn_->setIcon(Icons::get(Icons::Play, Theme::Success, Theme::Success));
+        runBtn_->setToolTip("Run File (F5)");
+        runBtn_->setCursor(Qt::PointingHandCursor);
+        stopBtn_ = new QToolButton(corner);
+        stopBtn_->setObjectName("stopButton");
+        stopBtn_->setIcon(Icons::get(Icons::Stop, Theme::Error, Theme::Error));
+        stopBtn_->setToolTip("Stop (Shift+F5)");
+        stopBtn_->setCursor(Qt::PointingHandCursor);
+        stopBtn_->setEnabled(false);
+        cl->addWidget(runBtn_);
+        cl->addWidget(stopBtn_);
+        connect(runBtn_, &QToolButton::clicked, this, [this]() { runCurrent(); });
+        connect(stopBtn_, &QToolButton::clicked, this, [this]() { stopRun(); });
+        tabs_->setCornerWidget(corner, Qt::TopRightCorner);
+        runPoll_ = new QTimer(this);                       // Stop is available while a program (or build) runs
+        runPoll_->setInterval(200);
+        connect(runPoll_, &QTimer::timeout, this, [this]() {
+            const bool busy = terminal_ && terminal_->busy();
+            if (stopBtn_->isEnabled() != busy) stopBtn_->setEnabled(busy);
+            if (runBtn_->isEnabled() == busy) runBtn_->setEnabled(!busy);
+        });
+        runPoll_->start();
+    }
 
     // status bar
     posLabel_ = new QLabel("Ln 1, Col 1");
@@ -232,7 +268,27 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
 void MainWindow::applyPrefs() {
     const AppSettings::Values& v = AppSettings::instance().values();
     statusBar()->setVisible(v.statusBar);
+    if (!v.autoSave) autoSaveTimer_->stop();
+    else if (autoSaveTimer_->isActive()) autoSaveTimer_->start(v.autoSaveDelay * 1000);      // a new delay applies at once
     // the theme and the accent colour are applied by Theme itself; onThemeChanged() follows
+}
+
+// Auto save: every modified file that already has a name is written (no dialogs; a failure is only reported in the status bar).
+int MainWindow::autoSaveNow() {
+    int saved = 0;
+    QString failed;
+    for (int i = 0; i < tabs_->count(); ++i) {
+        CodeView* v = viewAt(i);
+        const QString path = QString::fromStdString(v->editor().doc().path());
+        if (path.isEmpty() || !v->editor().doc().modified()) continue;
+        QString err;
+        if (v->saveFile(path, &err)) { ++saved; refreshTab(v); }
+        else failed = QFileInfo(path).fileName() + ": " + err;
+    }
+    if (saved > 0) refreshTitle();
+    if (!failed.isEmpty()) statusBar()->showMessage("Auto save failed - " + failed, 6000);
+    else if (saved > 0) statusBar()->showMessage(QString("Auto-saved %1 file(s)").arg(saved), 2000);
+    return saved;
 }
 
 // ---------------------------------------------------------------- themes
@@ -256,6 +312,8 @@ void MainWindow::onThemeChanged() {
         themeBtn_->setToolTip(QString("Theme: %1. Click to switch to %2 (Ctrl+Shift+L).")
                                   .arg(Theme::schemeName(id), Theme::schemeName(Theme::toggledScheme(id))));
     }
+    if (runBtn_) runBtn_->setIcon(Icons::get(Icons::Play, Theme::Success, Theme::Success));
+    if (stopBtn_) stopBtn_->setIcon(Icons::get(Icons::Stop, Theme::Error, Theme::Error));
     if (issueBtn_) {
         const bool clean = issueBtn_->text() == QLatin1String("No problems");
         issueBtn_->setIcon(clean ? Icons::get(Icons::Check, Theme::Success, Theme::Success)
@@ -306,6 +364,9 @@ bool MainWindow::runCurrent() {
 }
 
 void MainWindow::stopRun() { if (terminal_) terminal_->stop(); }
+
+bool MainWindow::sidebarVisible() const { return dock_ && !dock_->isHidden(); }
+void MainWindow::toggleSidebar() { dock_->setVisible(!sidebarVisible()); }
 
 bool MainWindow::bottomVisible() const { return bottom_ && !bottom_->isHidden(); }
 bool MainWindow::terminalVisible() const { return bottomVisible() && bottom_->currentWidget() == terminal_; }
@@ -622,11 +683,7 @@ void MainWindow::buildActions() {
     add(view, "Toggle Terminal", seq("Ctrl+`"), [this]() { showTerminal(!terminalVisible()); });
     problemsAct_ = add(view, "Toggle Problems", seq("Ctrl+Shift+M"), [this]() { showProblems(!problemsVisible()); });
     problemsAct_->setCheckable(true);
-    QAction* side = dock_->toggleViewAction();
-    side->setText("Toggle Sidebar");
-    side->setShortcut(QKeySequence(QStringLiteral("Ctrl+B")));
-    view->addAction(side);
-    addAction(side);
+    add(view, "Toggle Sidebar", seq("Ctrl+B"), [this]() { toggleSidebar(); });
     auto zoomBy = [this](int d) {                          // zoom is the font-size setting, shared by every tab
         const int target = d == 0 ? AppSettings::Values().fontSize : AppSettings::instance().values().fontSize + d;
         AppSettings::Values v = AppSettings::instance().values();
@@ -850,6 +907,8 @@ void MainWindow::connectView(CodeView* v) {
     connect(v, &CodeView::textEdited, this, [this, v]() {
         if (v == currentView() && findBar_->isVisible()) highlightAll();
         if (v == currentView()) scheduleCheck();
+        const AppSettings::Values& pv = AppSettings::instance().values();
+        if (pv.autoSave && !v->editor().doc().path().empty()) autoSaveTimer_->start(pv.autoSaveDelay * 1000);   // restarts after every edit
     });
     connect(v, &CodeView::diagnosticsChanged, this, [this, v]() { if (v == currentView()) refreshProblems(); });
     connect(v, &CodeView::statusMessage, this, [this](const QString& m) { if (!m.isEmpty()) statusBar()->showMessage(m, 4000); });

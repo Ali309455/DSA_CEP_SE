@@ -186,6 +186,11 @@ FileExplorer::FileExplorer(QWidget* parent) : QWidget(parent) {
     QToolButton* bRefresh = toolButton(header_, Icons::Refresh, "Refresh Explorer");
     QToolButton* bCollapse = toolButton(header_, Icons::Collapse, "Collapse Folders");
     for (QToolButton* b : {bNewFile, bNewFolder, bRefresh, bCollapse}) { b->setObjectName("explorerButton"); hl->addWidget(b); }
+    QToolButton* bClose = toolButton(header_, Icons::Close, "Hide Sidebar (Ctrl+B)");
+    bClose->setObjectName("explorerClose");
+    hl->addSpacing(4);
+    hl->addWidget(bClose);
+    connect(bClose, &QToolButton::clicked, this, &FileExplorer::closeRequested);
     connect(bNewFile, &QToolButton::clicked, this, &FileExplorer::newFileDialog);
     connect(bNewFolder, &QToolButton::clicked, this, &FileExplorer::newFolderDialog);
     connect(bRefresh, &QToolButton::clicked, this, &FileExplorer::refresh);

@@ -69,6 +69,7 @@ signals:
     void pathRenamed(const QString& oldPath, const QString& newPath);   // rename or move, file or folder
     void pathRemoved(const QString& path);
     void openFolderRequested();
+    void closeRequested();                                              // the close button in the header (hide the sidebar)
 
 public slots:
     void newFileDialog();

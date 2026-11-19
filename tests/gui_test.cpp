@@ -7,6 +7,7 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QTemporaryDir>
+#include <QToolButton>
 #include <QTest>
 #include <iostream>
 #include <QFileSystemModel>
@@ -829,6 +830,95 @@ static void testThemes() {
     CHECK(Theme::currentScheme() == "midnight" && Theme::Editor == QColor(0x1f, 0x1f, 0x1f));
 }
 
+static void testSidebarToggle() {
+    std::cout << "[sidebar: Ctrl+B and the close button]\n";
+    MainWindow w;
+    w.show();
+    w.activateWindow();
+    (void)QTest::qWaitForWindowActive(&w);
+    CHECK(w.explorer()->isVisible());
+    w.newTab()->setFocus();
+    QTest::keyClick(&w, Qt::Key_B, Qt::ControlModifier);       // hides
+    CHECK(!w.explorer()->isVisible());
+    QTest::keyClick(&w, Qt::Key_B, Qt::ControlModifier);       // shows again
+    CHECK(w.explorer()->isVisible());
+    w.currentView()->setFocus();
+    QTest::keyClick(w.currentView(), Qt::Key_B, Qt::ControlModifier);   // with the focus in the editor
+    CHECK(!w.explorer()->isVisible());
+    QTest::keyClick(w.currentView(), Qt::Key_B, Qt::ControlModifier);
+    CHECK(w.explorer()->isVisible());
+    QToolButton* close = w.explorer()->findChild<QToolButton*>("explorerClose");   // the icon in the explorer's header
+    CHECK(close != nullptr);
+    if (close) { close->click(); CHECK(!w.explorer()->isVisible()); }
+    w.toggleSidebar();
+    CHECK(w.explorer()->isVisible());
+
+    // run and stop buttons
+    QToolButton* run = w.findChild<QToolButton*>("runButton");
+    QToolButton* stop = w.findChild<QToolButton*>("stopButton");
+    CHECK(run && stop && run->isEnabled() && !stop->isEnabled());
+}
+
+static void testAutoSave() {
+    std::cout << "[auto save]\n";
+    AppSettings& S = AppSettings::instance();
+    S.resetToDefaults();
+    CHECK(!S.values().autoSave && S.values().autoSaveDelay >= 1);               // off by default
+    QTemporaryDir tmp;
+    CHECK(tmp.isValid());
+    const QString file = QDir(tmp.path()).filePath("auto.txt");
+    { QFile f(file); (void)f.open(QIODevice::WriteOnly); f.write("one\n"); }
+    auto onDisk = [&]() { QFile f(file); (void)f.open(QIODevice::ReadOnly); return QString::fromUtf8(f.readAll()); };
+    MainWindow w;
+    w.show();
+    CHECK(w.openPath(file));
+    CodeView* v = w.currentView();
+    CHECK(v != nullptr);
+    if (!v) return;
+    v->setFocus();
+    type(v, "x");                                                               // off: nothing is written
+    QTest::qWait(1400);
+    CHECK_EQ(onDisk(), QString("one\n"));
+    CHECK(v->editor().doc().modified());
+
+    AppSettings::Values nv = S.values();                                        // on, 1 second
+    nv.autoSave = true;
+    nv.autoSaveDelay = 1;
+    S.apply(nv);
+    type(v, "y");
+    QTest::qWait(300);
+    CHECK_EQ(onDisk(), QString("one\n"));                                       // not yet: the delay has not passed
+    QTest::qWait(1400);
+    CHECK_EQ(onDisk(), QString("xyone\n"));
+    CHECK(!v->editor().doc().modified());
+
+    nv.autoSave = false;                                                        // off again: a pending save is cancelled
+    S.apply(nv);
+    S.resetToDefaults();
+}
+
+static void testSnippetSuggestions() {
+    std::cout << "[snippets in the suggestion list]\n";
+    SnippetStore::instance().resetToDefaults();
+    SnippetTable& T = SnippetStore::instance().table();
+    T.add("zzgreet", "Hello $0 world");
+    SnippetStore::instance().notifyChanged();
+    CodeView v;
+    v.resize(500, 300);
+    v.show();
+    setText(&v, "");
+    type(&v, "zzg");
+    QTest::qWait(300);                                        // the popup appears after a short pause
+    QListWidget* popup = v.findChild<QListWidget*>();
+    CHECK(popup && popup->isVisible() && popup->count() > 0);
+    CHECK(popup && popup->item(0)->text().startsWith("zzgreet") && popup->item(0)->text().contains("snippet"));
+    key(&v, Qt::Key_Return);                                  // accepting a snippet entry expands it
+    CHECK(popup && !popup->isVisible());
+    CHECK_EQ(txt(&v), QString("Hello  world\n"));
+    T.remove("zzgreet");
+    SnippetStore::instance().resetToDefaults();
+}
+
 static void testShortcutsWindow() {
     std::cout << "[keyboard shortcuts window]\n";
     const QList<ShortcutsDialog::Entry>& list = ShortcutsDialog::entries();
@@ -1321,6 +1411,9 @@ int main(int argc, char** argv) {
     testSettings();
     testSettingsDialog();
     testThemes();
+    testSidebarToggle();
+    testSnippetSuggestions();
+    testAutoSave();
     testShortcutsWindow();
     testTerminal();
     testPanelsInMainWindow();

@@ -1330,9 +1330,28 @@ void CodeView::showCompletions(bool force) {
     ac_.refresh(ed_.doc());                                              // words of this document join the dictionary
     DynArray<std::string> list = ac_.suggest(prefix, 8);
     popup_->clear();
+    // snippets first: every trigger that starts with what is typed (Tab or Enter expands it)
+    QStringList snippetTriggers;
+    {
+        const SnippetTable& table = SnippetStore::instance().table();
+        const DynArray<std::string> keys = table.triggers();
+        for (size_t i = 0; i < keys.size() && snippetTriggers.size() < 4; ++i)
+            if (keys[i].compare(0, prefix.size(), prefix) == 0) snippetTriggers << QString::fromStdString(keys[i]);
+    }
+    for (const QString& trig : snippetTriggers) {
+        QListWidgetItem* it = new QListWidgetItem(trig + "    snippet");
+        it->setData(Qt::UserRole, trig);
+        it->setData(Qt::UserRole + 1, true);
+        it->setForeground(Theme::Accent);
+        const Snippet* sn = SnippetStore::instance().table().find(trig.toStdString());
+        if (sn) it->setToolTip(QString::fromStdString(sn->body).left(300));
+        popup_->addItem(it);
+    }
     for (size_t i = 0; i < list.size(); ++i) {
         if (list[i] == prefix) continue;
-        popup_->addItem(QString::fromStdString(list[i]));
+        const QString w = QString::fromStdString(list[i]);
+        if (snippetTriggers.contains(w)) continue;                      // the snippet entry already stands for it
+        popup_->addItem(w);
     }
     if (popup_->count() == 0) { popup_->hide(); return; }
     popup_->setCurrentRow(0);
@@ -1351,11 +1370,13 @@ void CodeView::showCompletions(bool force) {
 void CodeView::acceptCompletion() {
     QListWidgetItem* it = popup_->currentItem();
     if (!it) { hidePopup(); return; }
-    const std::string word = it->text().toStdString();
+    const bool isSnippet = it->data(Qt::UserRole + 1).toBool();
+    const std::string word = (isSnippet ? it->data(Qt::UserRole).toString() : it->text()).toStdString();
     hidePopup();
     const size_t from = cur_.line;
     cur_ = applyCompletion(ed_, cur_, word);
-    ac_.accepted(word);
+    if (!isSnippet) ac_.accepted(word);
     anchor_ = cur_;
     edited(from);
+    if (isSnippet) expandSnippet();                                      // the trigger is complete now: replace it by the snippet
 }

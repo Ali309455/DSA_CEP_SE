@@ -10,7 +10,8 @@ bool AppSettings::Values::operator==(const Values& o) const {
            cursorBlink == o.cursorBlink && theme == o.theme && accent == o.accent && lineNumbers == o.lineNumbers &&
            indentGuides == o.indentGuides && highlightLine == o.highlightLine && matchBrackets == o.matchBrackets &&
            statusBar == o.statusBar && terminalFontSize == o.terminalFontSize && terminalShell == o.terminalShell &&
-           terminalScrollback == o.terminalScrollback && restoreSession == o.restoreSession;
+           terminalScrollback == o.terminalScrollback && restoreSession == o.restoreSession && autoSave == o.autoSave &&
+           autoSaveDelay == o.autoSaveDelay;
 }
 
 static const AppSettings::Accent kAccents[] = {
@@ -33,6 +34,7 @@ AppSettings::Values AppSettings::sanitized(Values v) {
     v.fontSize = std::max(7, std::min(36, v.fontSize));
     if (v.tabWidth != 2 && v.tabWidth != 4 && v.tabWidth != 8) v.tabWidth = 4;
     v.cursorStyle = std::max(0, std::min(2, v.cursorStyle));
+    v.autoSaveDelay = std::max(1, std::min(300, v.autoSaveDelay));
     v.terminalFontSize = std::max(7, std::min(30, v.terminalFontSize));
     v.terminalScrollback = std::max(200, std::min(100000, v.terminalScrollback));
     bool known = false;
@@ -80,6 +82,8 @@ void AppSettings::load() {
     v.terminalShell = s.value("terminalShell", d.terminalShell).toString();
     v.terminalScrollback = s.value("terminalScrollback", d.terminalScrollback).toInt();
     v.restoreSession = s.value("restoreSession", d.restoreSession).toBool();
+    v.autoSave = s.value("autoSave", d.autoSave).toBool();
+    v.autoSaveDelay = s.value("autoSaveDelay", d.autoSaveDelay).toInt();
     v_ = sanitized(v);
 }
 
@@ -105,6 +109,8 @@ void AppSettings::save() const {
     s.setValue("terminalShell", v_.terminalShell);
     s.setValue("terminalScrollback", v_.terminalScrollback);
     s.setValue("restoreSession", v_.restoreSession);
+    s.setValue("autoSave", v_.autoSave);
+    s.setValue("autoSaveDelay", v_.autoSaveDelay);
 }
 
 void AppSettings::apply(const Values& in) {

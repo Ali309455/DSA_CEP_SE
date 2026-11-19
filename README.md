@@ -246,7 +246,7 @@ key presses into engine calls.
 | Area | Keys |
 |---|---|
 | Tabs | `Ctrl+Tab` / `Ctrl+Shift+Tab` next / previous (also `Ctrl+PgDn` / `Ctrl+PgUp`), `Alt+1`..`Alt+9` go to tab (`Alt+9` = last), `Ctrl+N` new, `Ctrl+W` close |
-| Files | `Ctrl+P` fuzzy file search ("mw" finds `MainWindow.cpp`), `F2` rename file, `Ctrl+O` open, `Ctrl+Shift+O` open folder, `Ctrl+S` / `Ctrl+Shift+S` / `Ctrl+Alt+S` save / save as / save all, `Ctrl+B` sidebar |
+| Files | `Ctrl+P` fuzzy file search ("mw" finds `MainWindow.cpp`), `F2` rename file, `Ctrl+O` open, `Ctrl+Shift+O` open folder, `Ctrl+S` / `Ctrl+Shift+S` / `Ctrl+Alt+S` save / save as / save all, `Ctrl+B` shows / hides the sidebar (so does the x in the explorer header) |
 | Lines | `Alt+Up` / `Alt+Down` move line (or all selected lines), `Shift+Alt+Up` / `Shift+Alt+Down` copy line up / down (`Ctrl+D` copy down), `Ctrl+Shift+K` delete line, `Ctrl+Enter` / `Ctrl+Shift+Enter` new line below / above, `Ctrl+]` / `Ctrl+[` indent / outdent, `Ctrl+/` toggle comment, `Ctrl+L` select line |
 | Brackets, quotes | with text selected type `(` `[` `{` `"` `'` `` ` `` to wrap it (selection stays on the text); the same key again, or the closing bracket, removes the pair; typing an opener adds the closer, typing the closer steps over it, Backspace between an empty pair removes both |
 | Typing | smart Enter keeps the indent and opens a block between `{ }`; Tab / Shift+Tab indent / outdent selected lines; Backspace in leading spaces goes back one tab stop; `Home` jumps to the first non-blank character first |
@@ -262,6 +262,12 @@ key presses into engine calls.
   Everything applies immediately and is remembered; the search box filters the rows.
 - **Terminal** (`Ctrl+\``): runs commands in the open folder (cmd on Windows, `$SHELL` elsewhere, or the shell chosen
   in Settings), shows ANSI colours, remembers `cd`, `Up`/`Down` history, `Ctrl+C` stops, `Ctrl+L` clears.
+- **Run / Stop buttons**: a green play and a red stop icon at the top right of the tab strip do the same as `F5` / `Shift+F5`
+  (Stop is enabled while something runs).
+- **Auto save** (Settings > General, off by default): saves modified files that already have a name once you have stopped
+  typing for the chosen delay (1 to 300 seconds, 3 by default).
+- **Snippets in suggestions**: the autocomplete list shows matching snippet triggers first (marked "snippet"); accepting one
+  expands it. Edit > Manage Snippets... adds, edits and deletes them.
 - **Run** (`F5`): saves the file, builds it if needed and runs it in the terminal, in the file's folder. `Shift+F5`
   stops it. Needs the tool on PATH: `g++`/`gcc` (C/C++), `python`, `node`, `java`, `go`, `rustc`, `ruby`, `php`, `lua`,
   `bash`; `.bat`/`.cmd`/`.ps1` run directly. A compile error stops the run, so an old build never runs by mistake.

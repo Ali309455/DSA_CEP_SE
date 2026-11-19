@@ -77,6 +77,9 @@ public:
     ShortcutsDialog* showShortcuts();
     bool runCurrent();                                     // F5: save, build if needed, run in the terminal
     void stopRun();                                        // Shift+F5
+    int autoSaveNow();                                     // save every modified file that has a name; returns how many
+    void toggleSidebar();                                  // Ctrl+B, or the close button in the explorer header
+    bool sidebarVisible() const;
 
 protected:
     void closeEvent(QCloseEvent*) override;
@@ -116,6 +119,7 @@ private:
     ProblemsPanel* problems_ = nullptr;
     SyntaxChecker* checker_ = nullptr;
     QTimer* checkTimer_ = nullptr;
+    QTimer* autoSaveTimer_ = nullptr;                      // Settings > General > Auto save: fires after the last edit
     QAction* problemsAct_ = nullptr;
     QPointer<CodeView> checkView_;                         // the tab the running check belongs to
     unsigned checkRevision_ = 0;                           // its text version when the check started
@@ -166,6 +170,9 @@ private:
     void runFind(bool backwards, bool fromSelectionStart);
     std::vector<Match> matches_;
     QPushButton* issueBtn_ = nullptr;
+    QToolButton* runBtn_ = nullptr;                        // top right of the tabs: run the file (F5)
+    QToolButton* stopBtn_ = nullptr;                       // ... and stop it (Shift+F5); enabled while something runs
+    QTimer* runPoll_ = nullptr;
     QPushButton* themeBtn_ = nullptr;                      // status bar: shows the theme, click toggles light / dark
     QList<QAction*> themeActs_;                            // View > Theme, one per theme (checkable)
     SearchOptions searchOptions() const;

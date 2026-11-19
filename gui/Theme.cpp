@@ -489,7 +489,8 @@ QToolBar#activityBar QToolButton:hover { background: transparent; }
 #fileExplorer, #explorerHeader { background: @chrome@; }
 #explorerTitle { color: @subhead@; font-weight: 600; font-size: 11px; letter-spacing: 1px; }
 #explorerHint { color: @muted@; }
-QToolButton#explorerButton { border-radius: 5px; padding: 3px; }
+QToolButton#explorerButton, QToolButton#explorerClose { border-radius: 5px; padding: 3px; }
+QToolButton#runButton, QToolButton#stopButton { border-radius: 5px; padding: 4px; }
 QPushButton#explorerOpen { background: @accent@; color: #ffffff; border: 0; padding: 7px; border-radius: 6px; }
 QPushButton#explorerOpen:hover { background: @hover@; }
 
