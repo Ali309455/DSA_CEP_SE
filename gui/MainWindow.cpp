@@ -13,6 +13,7 @@
 #include <QDropEvent>
 #include <QFileDialog>
 #include <QFileInfo>
+#include <QFrame>
 #include <QHBoxLayout>
 #include <QInputDialog>
 #include <QKeyEvent>
@@ -23,6 +24,9 @@
 #include <QMenuBar>
 #include <QMessageBox>
 #include <QMimeData>
+#include <QPainter>
+#include <QRegularExpression>
+#include <QStyledItemDelegate>
 #include <QPushButton>
 #include <QSettings>
 #include <QShortcut>
@@ -51,6 +55,7 @@
 #include "TerminalPanel.h"
 #include "ProblemsPanel.h"
 #include "SnippetDialog.h"
+#include "SidePanels.h"
 #include "SyntaxChecker.h"
 #include "Runner.h"
 #include <QStandardPaths>
@@ -130,6 +135,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     // Problems and Terminal under the editor (one tab strip), with a splitter to drag it taller or shorter
     terminal_ = new TerminalPanel(this);
     connect(terminal_, &TerminalPanel::hideRequested, this, [this]() { showTerminal(false); });
+    connect(terminal_, &TerminalPanel::openLocationRequested, this, [this](const QString& p, int line, int col) { openLocation(p, line, col); });
     problems_ = new ProblemsPanel(this);
     connect(problems_, &ProblemsPanel::hideRequested, this, [this]() { showProblems(false); });
     connect(problems_, &ProblemsPanel::jumpRequested, this, &MainWindow::jumpToProblem);
@@ -192,35 +198,54 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     dock_->setMinimumWidth(170);
     addDockWidget(Qt::LeftDockWidgetArea, dock_);
     resizeDocks({dock_}, {250}, Qt::Horizontal);
+    buildSidePanels();
 
     // run / stop buttons in the top right corner of the tab strip
+    // (one rounded group, centred on the tab strip; the button that cannot be used is dimmed).
+    // Qt lines a corner widget up with the bottom of the tab area, which is never quite the middle,
+    // so the corner widget only reserves the width (tabs stop before it) and the group is placed
+    // over it by placeRunGroup(), centred on the tab bar's real geometry.
     {
-        QWidget* corner = new QWidget(tabs_);
-        QHBoxLayout* cl = new QHBoxLayout(corner);
-        cl->setContentsMargins(4, 0, 6, 0);
-        cl->setSpacing(2);
-        runBtn_ = new QToolButton(corner);
-        runBtn_->setObjectName("runButton");
-        runBtn_->setIcon(Icons::get(Icons::Play, Theme::Success, Theme::Success));
-        runBtn_->setToolTip("Run File (F5)");
-        runBtn_->setCursor(Qt::PointingHandCursor);
-        stopBtn_ = new QToolButton(corner);
-        stopBtn_->setObjectName("stopButton");
-        stopBtn_->setIcon(Icons::get(Icons::Stop, Theme::Error, Theme::Error));
-        stopBtn_->setToolTip("Stop (Shift+F5)");
-        stopBtn_->setCursor(Qt::PointingHandCursor);
+        runCorner_ = new QWidget(tabs_);
+        runCorner_->setFixedSize(84, 1);
+        runCorner_->setAttribute(Qt::WA_TransparentForMouseEvents);
+        QFrame* group = new QFrame(tabs_);
+        runGroup_ = group;
+        group->setObjectName("runGroup");
+        QHBoxLayout* gl = new QHBoxLayout(group);
+        gl->setContentsMargins(2, 2, 2, 2);
+        gl->setSpacing(2);
+        auto makeButton = [group](const char* name, const QString& tip) {
+            QToolButton* b = new QToolButton(group);
+            b->setObjectName(name);
+            b->setToolTip(tip);
+            b->setCursor(Qt::PointingHandCursor);
+            b->setFocusPolicy(Qt::NoFocus);
+            b->setFixedSize(28, 24);
+            b->setIconSize(QSize(15, 15));
+            return b;
+        };
+        runBtn_ = makeButton("runButton", "Run File (F5)");
+        stopBtn_ = makeButton("stopButton", "Stop (Shift+F5)");
         stopBtn_->setEnabled(false);
-        cl->addWidget(runBtn_);
-        cl->addWidget(stopBtn_);
+        gl->addWidget(runBtn_);
+        gl->addWidget(stopBtn_);
+        group->adjustSize();
         connect(runBtn_, &QToolButton::clicked, this, [this]() { runCurrent(); });
         connect(stopBtn_, &QToolButton::clicked, this, [this]() { stopRun(); });
-        tabs_->setCornerWidget(corner, Qt::TopRightCorner);
+        tabs_->setCornerWidget(runCorner_, Qt::TopRightCorner);
+        tabs_->installEventFilter(this);                  // resized: move the group along
+        tabs_->tabBar()->installEventFilter(this);
+        refreshRunButtons();
         runPoll_ = new QTimer(this);                       // Stop is available while a program (or build) runs
         runPoll_->setInterval(200);
         connect(runPoll_, &QTimer::timeout, this, [this]() {
             const bool busy = terminal_ && terminal_->busy();
-            if (stopBtn_->isEnabled() != busy) stopBtn_->setEnabled(busy);
-            if (runBtn_->isEnabled() == busy) runBtn_->setEnabled(!busy);
+            if (stopBtn_->isEnabled() != busy || runBtn_->isEnabled() == busy) {
+                stopBtn_->setEnabled(busy);
+                runBtn_->setEnabled(!busy);
+                refreshRunButtons();
+            }
         });
         runPoll_->start();
     }
@@ -251,6 +276,10 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     themeBtn_->setFocusPolicy(Qt::NoFocus);
     connect(themeBtn_, &QPushButton::clicked, this, [this]() { toggleTheme(); });
     statusBar()->addPermanentWidget(themeBtn_);
+    QWidget* edge = new QWidget();                         // keeps the last item off the window's right edge
+    edge->setFixedWidth(6);
+    edge->setAttribute(Qt::WA_TransparentForMouseEvents);
+    statusBar()->addPermanentWidget(edge);
 
     buildActions();
     buildActivityBar();
@@ -301,6 +330,35 @@ void MainWindow::setTheme(const QString& id) {
 
 void MainWindow::toggleTheme() { setTheme(Theme::toggledScheme(AppSettings::instance().values().theme)); }
 
+// The Run / Stop group: in the space the corner widget keeps free at the right end of the tab strip,
+// vertically centred on the tab bar, 10 pixels from the window edge.
+void MainWindow::placeRunGroup() {
+    if (!runGroup_ || !tabs_) return;
+    const QRect bar = tabs_->tabBar()->geometry();
+    const QSize s = runGroup_->sizeHint();
+    const int barH = bar.height() > 0 ? bar.height() : 36;
+    const int x = tabs_->width() - s.width() - 10;
+    const int y = bar.top() + (barH - s.height()) / 2;
+    runGroup_->setGeometry(x, std::max(0, y), s.width(), s.height());
+    runGroup_->raise();
+}
+
+bool MainWindow::eventFilter(QObject* o, QEvent* e) {
+    if ((o == tabs_ || (tabs_ && o == tabs_->tabBar())) &&
+        (e->type() == QEvent::Resize || e->type() == QEvent::Move || e->type() == QEvent::Show || e->type() == QEvent::LayoutRequest))
+        QTimer::singleShot(0, this, [this]() { placeRunGroup(); });   // after Qt finished its own layout
+    return QMainWindow::eventFilter(o, e);
+}
+
+// Coloured when usable (green Run, red Stop), the theme's dim grey when not.
+void MainWindow::refreshRunButtons() {
+    if (!runBtn_ || !stopBtn_) return;
+    const QColor run = runBtn_->isEnabled() ? Theme::Success : Theme::Dim;
+    const QColor stop = stopBtn_->isEnabled() ? Theme::Error : Theme::Dim;
+    runBtn_->setIcon(Icons::get(Icons::Play, run, run));
+    stopBtn_->setIcon(Icons::get(Icons::Stop, stop, stop));
+}
+
 void MainWindow::onThemeChanged() {
     if (welcome_) welcome_->refreshAccent();
     enableDarkTitleBar(this);
@@ -312,8 +370,7 @@ void MainWindow::onThemeChanged() {
         themeBtn_->setToolTip(QString("Theme: %1. Click to switch to %2 (Ctrl+Shift+L).")
                                   .arg(Theme::schemeName(id), Theme::schemeName(Theme::toggledScheme(id))));
     }
-    if (runBtn_) runBtn_->setIcon(Icons::get(Icons::Play, Theme::Success, Theme::Success));
-    if (stopBtn_) stopBtn_->setIcon(Icons::get(Icons::Stop, Theme::Error, Theme::Error));
+    refreshRunButtons();
     if (issueBtn_) {
         const bool clean = issueBtn_->text() == QLatin1String("No problems");
         issueBtn_->setIcon(clean ? Icons::get(Icons::Check, Theme::Success, Theme::Success)
@@ -366,6 +423,43 @@ bool MainWindow::runCurrent() {
 void MainWindow::stopRun() { if (terminal_) terminal_->stop(); }
 
 bool MainWindow::sidebarVisible() const { return dock_ && !dock_->isHidden(); }
+
+// ---------------------------------------------------------------- outline and undo history (right side)
+
+void MainWindow::buildSidePanels() {
+    auto makeDock = [this](const char* name, const QString& title, QWidget* panel) {
+        QDockWidget* d = new QDockWidget(title, this);
+        d->setObjectName(name);
+        d->setWidget(panel);
+        d->setTitleBarWidget(new QWidget(d));            // the panels draw their own header
+        d->setFeatures(QDockWidget::NoDockWidgetFeatures);
+        d->setMinimumWidth(190);
+        addDockWidget(Qt::RightDockWidgetArea, d);        // both open: Outline on top, History below
+        d->hide();
+        return d;
+    };
+    outline_ = new OutlinePanel(this);
+    history_ = new HistoryPanel(this);
+    outlineDock_ = makeDock("outlineDock", "Outline", outline_);
+    historyDock_ = makeDock("historyDock", "Undo History", history_);
+    connect(outline_, &OutlinePanel::closeRequested, this, [this]() { showOutline(false); });
+    connect(history_, &HistoryPanel::closeRequested, this, [this]() { showHistory(false); });
+}
+
+void MainWindow::showOutline(bool show) {
+    outlineDock_->setVisible(show);
+    if (show) resizeDocks({outlineDock_}, {250}, Qt::Horizontal);
+    if (!show && currentView()) currentView()->setFocus();
+}
+
+void MainWindow::showHistory(bool show) {
+    historyDock_->setVisible(show);
+    if (show) resizeDocks({historyDock_}, {250}, Qt::Horizontal);
+    if (!show && currentView()) currentView()->setFocus();
+}
+
+bool MainWindow::outlineVisible() const { return outlineDock_ && !outlineDock_->isHidden(); }
+bool MainWindow::historyVisible() const { return historyDock_ && !historyDock_->isHidden(); }
 void MainWindow::toggleSidebar() { dock_->setVisible(!sidebarVisible()); }
 
 bool MainWindow::bottomVisible() const { return bottom_ && !bottom_->isHidden(); }
@@ -633,6 +727,11 @@ void MainWindow::buildActions() {
     add(lines, "Insert Line Above", {QKeySequence(QStringLiteral("Ctrl+Shift+Return")), QKeySequence(QStringLiteral("Ctrl+Shift+Enter"))}, onView(&CodeView::newLineAbove));
     add(lines, "Indent", seq("Ctrl+]"), onView(&CodeView::indentSelection));
     add(lines, "Outdent", seq("Ctrl+["), onView(&CodeView::outdentSelection));
+    QMenu* folding = edit->addMenu("Folding");
+    add(folding, "Fold", seq("Ctrl+Shift+["), onView(&CodeView::foldAtCursor));
+    add(folding, "Unfold", seq("Ctrl+Shift+]"), onView(&CodeView::unfoldAtCursor));
+    add(folding, "Fold All", {}, onView(&CodeView::foldAll));
+    add(folding, "Unfold All", {}, onView(&CodeView::unfoldAll));
     add(edit, "Toggle Line Comment", seq("Ctrl+/"), onView(&CodeView::toggleComment));
     add(edit, "Trigger Autocomplete", seq("Ctrl+Space"), onView(&CodeView::triggerAutocomplete));
     add(edit, "Expand Snippet", seq("Ctrl+J"), onView(&CodeView::expandSnippet));
@@ -645,6 +744,7 @@ void MainWindow::buildActions() {
     add(search, "Find Previous", {QKeySequence(QStringLiteral("Shift+F3"))}, [this]() { findNext(true); });
     search->addSeparator();
     add(search, "Go to File…", {QKeySequence(QStringLiteral("Ctrl+P"))}, [this]() { quickOpen(); });
+    add(search, "Command Palette…", seq("Ctrl+Shift+P"), [this]() { commandPalette(); });
     add(search, "Go to Line…", seq("Ctrl+G"), [this]() { goToLineDialog(); });
 
     QMenu* run = menuBar()->addMenu("&Run");
@@ -684,6 +784,22 @@ void MainWindow::buildActions() {
     problemsAct_ = add(view, "Toggle Problems", seq("Ctrl+Shift+M"), [this]() { showProblems(!problemsVisible()); });
     problemsAct_->setCheckable(true);
     add(view, "Toggle Sidebar", seq("Ctrl+B"), [this]() { toggleSidebar(); });
+    add(view, "Toggle Outline", seq("Ctrl+F12"), [this]() { showOutline(!outlineVisible()); });
+    add(view, "Toggle Undo History", seq("Ctrl+Shift+H"), [this]() { showHistory(!historyVisible()); });
+    // word wrap and breadcrumbs are settings: the menu items flip them and follow the Settings window
+    auto settingToggle = [this, &add, &view](const QString& text, const QList<QKeySequence>& keys, bool AppSettings::Values::*field) {
+        QAction* a = add(view, text, keys, [field]() {
+            AppSettings::Values v = AppSettings::instance().values();
+            v.*field = !(v.*field);
+            AppSettings::instance().apply(v);
+        });
+        a->setCheckable(true);
+        a->setChecked(AppSettings::instance().values().*field);
+        connect(&AppSettings::instance(), &AppSettings::changed, a, [a, field]() { a->setChecked(AppSettings::instance().values().*field); });
+        return a;
+    };
+    settingToggle("Word Wrap", seq("Alt+Z"), &AppSettings::Values::wordWrap);
+    settingToggle("Breadcrumbs", {}, &AppSettings::Values::breadcrumbs);
     auto zoomBy = [this](int d) {                          // zoom is the font-size setting, shared by every tab
         const int target = d == 0 ? AppSettings::Values().fontSize : AppSettings::instance().values().fontSize + d;
         AppSettings::Values v = AppSettings::instance().values();
@@ -912,6 +1028,10 @@ void MainWindow::connectView(CodeView* v) {
     });
     connect(v, &CodeView::diagnosticsChanged, this, [this, v]() { if (v == currentView()) refreshProblems(); });
     connect(v, &CodeView::statusMessage, this, [this](const QString& m) { if (!m.isEmpty()) statusBar()->showMessage(m, 4000); });
+    connect(v, &CodeView::revealInExplorer, this, [this](const QString& p) {   // a folder crumb was clicked
+        dock_->show();
+        explorer_->reveal(p);
+    });
 }
 
 CodeView* MainWindow::newTab(const QString& path) {
@@ -954,6 +1074,25 @@ int MainWindow::indexOfPath(const QString& path) const {
         if (!p.isEmpty() && QFileInfo(p).canonicalFilePath() == want) return i;
     }
     return -1;
+}
+
+bool MainWindow::openLocation(const QString& path, int line, int col) {
+    QStringList tries{path};
+    if (!root_.isEmpty()) {                                   // a relative name from a build run elsewhere
+        tries << QDir(root_).filePath(path);
+        tries << QDir(root_).filePath(QFileInfo(path).fileName());
+    }
+    for (const QString& p : tries) {
+        if (!QFileInfo(p).isFile() || !openPath(p)) continue;
+        CodeView* v = currentView();
+        if (!v) return false;
+        v->goToLine(std::max(1, line));
+        if (col > 0) v->setCursor(Pos{static_cast<size_t>(std::max(1, line) - 1), static_cast<size_t>(col - 1)});
+        v->setFocus();
+        return true;
+    }
+    statusBar()->showMessage("File not found: " + QDir::toNativeSeparators(path), 4000);
+    return false;
 }
 
 bool MainWindow::openPath(const QString& path) {
@@ -1001,6 +1140,8 @@ void MainWindow::refreshTitle() {
 
 void MainWindow::onTabChanged(int) {
     CodeView* v = currentView();
+    if (outline_) outline_->setView(v);                    // the right-hand panels follow the current tab
+    if (history_) history_->setView(v);
     if (!v) return;
     explorer_->reveal(QString::fromStdString(v->editor().doc().path()));
     refreshTitle();
@@ -1102,6 +1243,8 @@ void MainWindow::setWorkspaceRoot(const QString& dir) {
     if (!fi.isDir()) return;
     root_ = fi.canonicalFilePath();
     rootChosen_ = true;
+    CodeView::setBreadcrumbRoot(root_);                   // breadcrumbs show paths from the open folder
+    for (int i = 0; i < tabs_->count(); ++i) viewAt(i)->refreshBreadcrumbs();
     explorer_->setRoot(root_);
     terminal_->setWorkingDirectory(root_);
     welcome_->setFolderOpen(true);
@@ -1272,6 +1415,170 @@ void MainWindow::quickOpen() {
     }
 }
 
+// ---------------------------------------------------------------- command palette
+
+namespace {
+// Paints a palette row: the command on the left, its menu path dimmed after it, the shortcut on the right.
+class CommandDelegate : public QStyledItemDelegate {
+public:
+    using QStyledItemDelegate::QStyledItemDelegate;
+    void paint(QPainter* p, const QStyleOptionViewItem& opt, const QModelIndex& idx) const override {
+        QStyleOptionViewItem o(opt);
+        initStyleOption(&o, idx);
+        const QString name = o.text;
+        o.text.clear();
+        QApplication::style()->drawControl(QStyle::CE_ItemViewItem, &o, p, o.widget);   // background, selection
+
+        const bool selected = o.state & QStyle::State_Selected;
+        const QRect r = o.rect.adjusted(10, 0, -10, 0);
+        const QString keys = idx.data(Qt::UserRole + 1).toString();
+        const QString where = idx.data(Qt::UserRole + 2).toString();
+        p->save();
+        const QFontMetrics fm(o.font);
+        int keysW = 0;
+        if (!keys.isEmpty()) {
+            keysW = fm.horizontalAdvance(keys) + 12;
+            p->setPen(selected ? Theme::selectionText() : Theme::Muted);
+            p->drawText(r, Qt::AlignVCenter | Qt::AlignRight, keys);
+        }
+        p->setFont(o.font);
+        p->setPen(selected ? Theme::selectionText() : Theme::Text);
+        const QRect textR = r.adjusted(0, 0, -keysW, 0);
+        const QString shown = fm.elidedText(name, Qt::ElideRight, textR.width());
+        p->drawText(textR, Qt::AlignVCenter | Qt::AlignLeft, shown);
+        const int nameW = fm.horizontalAdvance(shown) + 10;
+        if (!where.isEmpty() && nameW < textR.width()) {
+            p->setPen(selected ? Theme::selectionText() : Theme::Dim);
+            p->drawText(textR.adjusted(nameW, 0, 0, 0), Qt::AlignVCenter | Qt::AlignLeft,
+                        fm.elidedText(where, Qt::ElideRight, textR.width() - nameW));
+        }
+        p->restore();
+    }
+    QSize sizeHint(const QStyleOptionViewItem& opt, const QModelIndex& idx) const override {
+        QSize s = QStyledItemDelegate::sizeHint(opt, idx);
+        s.setHeight(std::max(s.height(), QFontMetrics(opt.font).height() + 12));
+        return s;
+    }
+};
+
+QString plainMenuText(QString t) {
+    t.remove(QRegularExpression("&(?!&)"));               // drop mnemonic markers, keep "&&" as "&"
+    t.replace("&&", "&");
+    return t.simplified();                                 // "Nord  (dark)" -> "Nord (dark)"
+}
+
+void collectCommands(const QMenu* menu, const QString& prefix, QList<MainWindow::PaletteCommand>& out) {
+    for (QAction* a : menu->actions()) {
+        if (a->isSeparator() || !a->isVisible() || a->text().isEmpty()) continue;
+        const QString name = plainMenuText(a->text());
+        if (QMenu* sub = a->menu()) { collectCommands(sub, prefix + name + "/", out); continue; }
+        if (!a->isEnabled()) continue;
+        MainWindow::PaletteCommand c;
+        c.path = prefix + name;
+        c.keys = a->shortcut().toString(QKeySequence::NativeText);
+        if (a->isCheckable()) c.keys = (a->isChecked() ? QStringLiteral("● ") : QString()) + c.keys;
+        c.action = a;
+        out.append(c);
+    }
+}
+}  // namespace
+
+QList<MainWindow::PaletteCommand> MainWindow::paletteCommands() const {
+    QList<PaletteCommand> out;
+    for (QAction* top : menuBar()->actions())
+        if (QMenu* m = top->menu()) collectCommands(m, plainMenuText(top->text()) + "/", out);
+    return out;
+}
+
+QStringList MainWindow::recentCommands() const { return QSettings().value("recentCommands").toStringList(); }
+
+QList<MainWindow::PaletteCommand> MainWindow::rankCommands(const QString& query, int maxResults) const {
+    const QList<PaletteCommand> all = paletteCommands();
+    QList<PaletteCommand> out;
+    if (query.trimmed().isEmpty()) {                       // personal order: what was used last comes first
+        const QStringList recent = recentCommands();
+        for (const QString& r : recent)
+            for (const PaletteCommand& c : all)
+                if (c.path == r) { out.append(c); break; }
+        for (const PaletteCommand& c : all)
+            if (!recent.contains(c.path)) out.append(c);
+        return out.mid(0, maxResults);
+    }
+    DynArray<std::string> paths;                           // the engine's fuzzy ranking, as in Go to File
+    for (const PaletteCommand& c : all) paths.push_back(c.path.toUtf8().toStdString());
+    const DynArray<size_t> hits = rankFiles(paths, query.toUtf8().toStdString(), static_cast<size_t>(std::max(0, maxResults)));
+    for (size_t i = 0; i < hits.size(); ++i) out.append(all[static_cast<int>(hits[i])]);
+    return out;
+}
+
+bool MainWindow::runCommand(const QString& path) {
+    for (const PaletteCommand& c : paletteCommands()) {
+        if (c.path != path) continue;
+        QStringList recent = recentCommands();
+        recent.removeAll(path);
+        recent.prepend(path);
+        QSettings().setValue("recentCommands", recent.mid(0, 8));
+        c.action->trigger();
+        return true;
+    }
+    return false;
+}
+
+void MainWindow::commandPalette() {
+    QDialog dlg(this, Qt::Dialog | Qt::FramelessWindowHint);
+    dlg.setObjectName("commandPalette");
+    dlg.setStyleSheet(QString("QDialog#commandPalette{background:%1;border:1px solid %2;}"
+                              "QListWidget{background:%1;border:0;}"
+                              "QListWidget::item{border-radius:5px;}"
+                              "QListWidget::item:selected{background:%3;color:%4;}")
+                          .arg(Theme::Popup.name(), Theme::InputBorder.name(), Theme::accentDeep().name(), Theme::selectionText().name()));
+    dlg.resize(640, 400);
+    QVBoxLayout* lay = new QVBoxLayout(&dlg);
+    lay->setContentsMargins(6, 6, 6, 6);
+    QLineEdit* input = new QLineEdit();
+    input->addAction(Icons::get(Icons::Palette), QLineEdit::LeadingPosition);
+    input->setPlaceholderText("Type a command … (e.g. \"tt\" for Toggle Terminal, \"nord\" for the Nord theme)");
+    QListWidget* list = new QListWidget();
+    list->setItemDelegate(new CommandDelegate(list));
+    lay->addWidget(input);
+    lay->addWidget(list, 1);
+    input->installEventFilter(new ListKeys(list, &dlg));
+
+    auto refresh = [&]() {
+        list->clear();
+        const QStringList recent = recentCommands();
+        const bool blank = input->text().trimmed().isEmpty();
+        for (const PaletteCommand& c : rankCommands(input->text())) {
+            const int cut = c.path.lastIndexOf('/');
+            QString where = c.path.left(cut).replace('/', QStringLiteral(" › "));
+            if (blank && recent.contains(c.path)) where = "recently used · " + where;
+            QListWidgetItem* it = new QListWidgetItem(c.path.mid(cut + 1), list);
+            it->setData(Qt::UserRole, c.path);
+            it->setData(Qt::UserRole + 1, c.keys);
+            it->setData(Qt::UserRole + 2, where);
+        }
+        if (list->count() > 0) list->setCurrentRow(0);
+    };
+    connect(input, &QLineEdit::textChanged, &dlg, refresh);
+    auto accept = [&]() {
+        QListWidgetItem* it = list->currentItem();
+        if (!it) return;
+        dlg.setProperty("pick", it->data(Qt::UserRole));
+        dlg.accept();
+    };
+    connect(input, &QLineEdit::returnPressed, &dlg, accept);
+    connect(list, &QListWidget::itemActivated, &dlg, accept);
+    refresh();
+    input->setFocus();
+
+    dlg.move(mapToGlobal(QPoint((width() - dlg.width()) / 2, 60)));
+    if (dlg.exec() == QDialog::Accepted) {
+        const QString path = dlg.property("pick").toString();
+        // run after the palette is gone, so commands that open their own window or move the focus behave
+        if (!path.isEmpty()) QTimer::singleShot(0, this, [this, path]() { runCommand(path); });
+    }
+}
+
 // ---------------------------------------------------------------- drag and drop, session
 
 void MainWindow::dragEnterEvent(QDragEnterEvent* e) {
@@ -1304,6 +1611,8 @@ void MainWindow::closeEvent(QCloseEvent* e) {
     s.setValue("geometry", saveGeometry());
     s.setValue("terminal", terminalVisible());
     s.setValue("problems", problemsVisible());
+    s.setValue("outline", outlineVisible());
+    s.setValue("history", historyVisible());
     s.setValue("terminalHeight", bottomVisible() ? bottom_->height() : terminalHeight_);
     e->accept();
 }
@@ -1322,4 +1631,6 @@ void MainWindow::restoreSession() {
     if (!cur.isEmpty()) { const int i = indexOfPath(cur); if (i >= 0) tabs_->setCurrentIndex(i); }
     if (s.value("terminal", false).toBool()) showTerminal(true);
     else if (s.value("problems", false).toBool()) showProblems(true);
+    if (s.value("outline", false).toBool()) showOutline(true);
+    if (s.value("history", false).toBool()) showHistory(true);
 }

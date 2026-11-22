@@ -14,6 +14,7 @@ The GUI (DevPad, Qt Widgets) is a thin layer on top; all editing logic lives in 
 | **4b** | Hash-table snippets (`engine/HashTable.h`, `Snippets.*`), console + GUI | **done** |
 | **4c** | Diagnostics: compiler (`g++ -fsyntax-only`) + bracket errors in one list; red / yellow squiggles, Problems tab, console `check` | **done** |
 | **5** | **DevPad**: Qt Widgets GUI built with CMake - multi-tab editing, line move / copy, auto-pairs and wrapping selections in `() [] {} "" ''`, Ctrl+Tab, Quick Open, rename file, find / replace, file tree | **done** |
+| **5b** | **DevPad refining**: Command Palette, code folding, Outline and Undo History panels, breadcrumbs, word wrap, clickable `file:line` links in the terminal, 14 themes with 10 syntax colours each | **done** |
 | 6 | Report, complexity table, screenshots | |
 
 ## Build (Windows, MSYS2 MinGW64 shell)
@@ -51,34 +52,38 @@ engine/DynArray.h     own dynamic array (replaces std::vector)
 engine/Stack.h        own stack on top of DynArray (replaces std::stack)
 engine/Document.h/cpp doubly linked list of lines + cursor cache
 engine/Command.h      Command / Group records (what an edit did, and how to reverse it)
-engine/UndoManager.h  the undo stack and redo stack, history cap (100 steps)
-engine/Editor.h/cpp   Document + history: every edit goes through here
+engine/UndoManager.h  the undo stack and redo stack, history cap (100 steps), read-only peek for the Undo History panel
+engine/Editor.h/cpp   Document + history: every edit goes through here; jumpToHistory, describeStep
 engine/Search.h/cpp   KMP: failure table, streaming matcher, findAll / findNext on a Document
 engine/Brackets.h/cpp bracket checker: stack scan, skips strings / comments, recovery, match at cursor
 engine/Trie.h/cpp     prefix tree: insert / remove / weights / top-k completion (own code, no std::map)
 engine/Assist.h/cpp   autocomplete (keywords trie + document-words trie), applyCompletion through the Editor
 engine/FileIO.h/cpp   open / save / save-as, errors returned not thrown
 engine/EditOps.h/cpp  code-editor commands: move / duplicate / indent / comment lines, auto-pair, wrap selection, smart Enter
-engine/Workspace.h/cpp folder listing + fuzzy file search (Quick Open)
-gui/CodeView.h/cpp    the text area: custom-painted Qt widget on top of Editor (no QTextDocument)
-gui/MainWindow.h/cpp  tabs, menus, shortcuts, find bar, Quick Open, rename
+engine/Workspace.h/cpp folder listing + fuzzy file search (Quick Open, Command Palette)
+engine/Folding.h/cpp  code folding: fold ranges (bracket pairs / indentation stack), FoldSet line <-> row map (binary search)
+engine/Outline.h/cpp  symbols for the Outline panel: class / struct / enum / function headers, nesting by stack
+gui/CodeView.h/cpp    the text area: custom-painted Qt widget on top of Editor (no QTextDocument); folding, word wrap, breadcrumbs
+gui/MainWindow.h/cpp  tabs, menus, shortcuts, find bar, Quick Open, Command Palette, rename, Run / Stop group
 gui/FileExplorer.h/cpp  the file manager in the left sidebar
 gui/WelcomePage.h/cpp   shown when no file is open: start actions, recent files / folders, shortcuts
 gui/Settings.h/cpp      the user's preferences (QSettings), one signal when anything changes
 gui/SettingsDialog.*    Settings window (Ctrl+,), gui/Controls.* its switches, steppers, swatches
 gui/ShortcutsDialog.*   Keyboard Shortcuts window (F1): searchable key-cap cards
-gui/TerminalPanel.*     built-in terminal under the editor (Ctrl+`)
+gui/TerminalPanel.*     built-in terminal under the editor (Ctrl+`), clickable file:line links
 gui/ProblemsPanel.*     Problems tab next to the terminal (Ctrl+Shift+M): errors / warnings, click to jump
 gui/SyntaxChecker.*     runs g++ -fsyntax-only on a copy of the text in the background (QProcess)
+gui/SidePanels.*        Outline (Ctrl+F12) and Undo History (Ctrl+Shift+H) panels on the right
+gui/Breadcrumbs.*       folder > file > class > function bar at the top of each editor (click to jump)
 gui/SnippetStore.*      the shared snippet table + snippets.txt in the app config folder; gui/SnippetDialog.* the Snippets window
-engine/Diagnostics.*    compiler-output parser, bracket issues as diagnostics, squiggle length, syntax-check runner
+engine/Diagnostics.*    compiler-output parser, bracket issues as diagnostics, squiggle length, syntax-check runner, file:line finder for the terminal
 engine/HashTable.h, Snippets.*  snippet hash table (chaining), `$0` cursor marker, save / load
 gui/Runner.h/cpp        what F5 runs for each file type
-gui/Theme.h/cpp         the 12 themes (Midnight, Daylight, Nord, Dracula, Monokai, Gruvbox, Tokyo Night, ...): palettes, style sheet, UI and code fonts (one place for every colour)
+gui/Theme.h/cpp         the 14 themes (Midnight, Daylight, Nord, Dracula, Monokai, Gruvbox, Tokyo Night, Jellyfish, ...): palettes, style sheet, UI and code fonts (one place for every colour)
 gui/Icons.h/cpp         all icons, drawn in code: line icons, file-type badges, folders, the app icon
 gui/WinTheme.h/cpp      dark / light title bars on Windows 10 / 11 (dwmapi), following the theme
 gui/devpad.ico, devpad.rc.in   the program icon for devpad.exe
-gui/main.cpp          entry point
+gui/main.cpp          entry point (DEVPAD_SNAPSHOT=out.png saves a picture of the window and quits, see instructions.md)
 app/console_main.cpp  command-line front end (1-based line/column numbers)
 tests/test_main.cpp   test suite incl. random stress test against a model
 tests/gui_test.cpp    headless GUI tests: real key presses against the real widgets
@@ -250,7 +255,9 @@ key presses into engine calls.
 | Lines | `Alt+Up` / `Alt+Down` move line (or all selected lines), `Shift+Alt+Up` / `Shift+Alt+Down` copy line up / down (`Ctrl+D` copy down), `Ctrl+Shift+K` delete line, `Ctrl+Enter` / `Ctrl+Shift+Enter` new line below / above, `Ctrl+]` / `Ctrl+[` indent / outdent, `Ctrl+/` toggle comment, `Ctrl+L` select line |
 | Brackets, quotes | with text selected type `(` `[` `{` `"` `'` `` ` `` to wrap it (selection stays on the text); the same key again, or the closing bracket, removes the pair; typing an opener adds the closer, typing the closer steps over it, Backspace between an empty pair removes both |
 | Typing | smart Enter keeps the indent and opens a block between `{ }`; Tab / Shift+Tab indent / outdent selected lines; Backspace in leading spaces goes back one tab stop; `Home` jumps to the first non-blank character first |
-| Search | `Ctrl+F` find, `Ctrl+H` replace, `F3` / `Shift+F3` next / previous, `Ctrl+G` go to line, `Ctrl+Space` autocomplete |
+| Search | `Ctrl+F` find, `Ctrl+H` replace, `F3` / `Shift+F3` next / previous, `Ctrl+G` go to line, `Ctrl+Space` autocomplete, `Ctrl+Shift+P` Command Palette (run any menu command by name) |
+| Folding | `Ctrl+Shift+[` fold the block at the cursor (again: the block around it), `Ctrl+Shift+]` unfold; click the arrow next to a line number; Edit > Folding > Fold All / Unfold All |
+| Panels | `Ctrl+F12` Outline, `Ctrl+Shift+H` Undo History, `Ctrl+\`` Terminal, `Ctrl+Shift+M` Problems, `Alt+Z` word wrap |
 | Edit | `Ctrl+Z`, `Ctrl+Y` / `Ctrl+Shift+Z`, cut / copy / paste (copy or cut with nothing selected takes the whole line), `Ctrl+Wheel` / `Ctrl+=` / `Ctrl+-` zoom |
 | Explorer (sidebar focused) | click / `Enter` open file or open/close folder, `F2` rename in place, `Del` delete to the Recycle Bin, `Shift+Del` delete permanently, `Ctrl+X` / `Ctrl+C` / `Ctrl+V` cut / copy / paste files, drag onto a folder to move (`Ctrl`+drag copies) |
 
@@ -258,12 +265,16 @@ key presses into engine calls.
 
 - **Settings** (`Ctrl+,`, the gear in the activity bar, File > Settings): font size and family, tab width, auto-close
   brackets, wrap selection, suggest-while-typing, cursor style and blinking, accent colour, line numbers, indent
-  guides, current-line and bracket highlight, status bar, terminal font / shell / scrollback, reopen last session.
-  Everything applies immediately and is remembered; the search box filters the rows.
+  guides, current-line and bracket highlight, status bar, word wrap, breadcrumbs, terminal font / shell / scrollback,
+  reopen last session. Everything applies immediately and is remembered; the search box filters the rows.
 - **Terminal** (`Ctrl+\``): runs commands in the open folder (cmd on Windows, `$SHELL` elsewhere, or the shell chosen
   in Settings), shows ANSI colours, remembers `cd`, `Up`/`Down` history, `Ctrl+C` stops, `Ctrl+L` clears.
-- **Run / Stop buttons**: a green play and a red stop icon at the top right of the tab strip do the same as `F5` / `Shift+F5`
-  (Stop is enabled while something runs).
+  **File references are links**: hover `main.cpp:12:5`, `src/a.h:7`, `C:\dir\x.cpp:3:1` or a Python
+  `File "x.py", line 4` and it is underlined; a click opens the file at that line and column (relative paths are
+  looked up in the terminal's folder, then in the open folder). Times (`12:30`), web addresses and names without
+  an extension are left alone. Dragging still selects text.
+- **Run / Stop buttons**: one rounded group at the right end of the tab strip, centred on it, doing the same as
+  `F5` / `Shift+F5`. Run is green and Stop red only while they can be used; otherwise they are dimmed.
 - **Auto save** (Settings > General, off by default): saves modified files that already have a name once you have stopped
   typing for the chosen delay (1 to 300 seconds, 3 by default).
 - **Snippets in suggestions**: the autocomplete list shows matching snippet triggers first (marked "snippet"); accepting one
@@ -274,18 +285,46 @@ key presses into engine calls.
 
 ### Look
 
-DevPad has 12 themes (`Theme.h`), each with its own syntax colours: **Midnight** (the default dark look),
+DevPad has 14 themes (`Theme.h`), each with its own syntax colours: **Midnight** (the default dark look),
 **Daylight**, **Nord**, **Solarized Light**, **Dracula**, **Alucard**, **Monokai**, **Paper**, **Gruvbox Dark**,
-**Gruvbox Light**, **Tokyo Night** and **One Light**. Pick one in Settings > Appearance > Theme or in View > Theme;
+**Gruvbox Light**, **Tokyo Night**, **One Light**, **Jellyfish** and **Jellyfish Light**. Pick one in Settings > Appearance > Theme or in View > Theme;
 `Ctrl+Shift+L` (or the theme button in the status bar) switches between the light and dark partner
 (Midnight <-> Daylight, Nord <-> Solarized Light, Dracula <-> Alucard, Monokai <-> Paper, Gruvbox Dark <-> Gruvbox
-Light, Tokyo Night <-> One Light). The choice is remembered and applies at once to the editor, the syntax colours,
-the sidebar, the terminal, the dialogs and the Windows title bar. The accent colour (blue by default) is chosen
+Light, Tokyo Night <-> One Light, Jellyfish <-> Jellyfish Light). The choice is remembered and applies at once to the editor, the syntax colours,
+the sidebar, the terminal, the dialogs and the Windows title bar. Code gets ten colours per theme: plain text,
+keywords, types (including capitalised class names such as `CodeView`), strings, numbers, comments,
+`#include` / preprocessor lines, function calls (`setIcon(...)`), operators (`->`, `::`, `+=`, `<=`) and constants
+(`true`, `nullptr`, `MAX_SIZE`). **Jellyfish** is a deep-sea navy with glowing pink, cyan, violet and mint; **Jellyfish
+Light** is the same family on a pale background. The accent colour (blue by default) is chosen
 separately and works with every theme. Every theme has rounded inputs and menus and thin scroll bars. Every
 icon is drawn in code by `Icons.h`, so there are no image files and icons stay sharp at any screen scale. The
 Explorer and the tabs show a coloured badge per file type. The activity bar on the far left has Explorer,
 Find, Go to File and Keyboard Shortcuts. Code uses Cascadia Code / Cascadia Mono when installed (Windows 11),
 otherwise JetBrains Mono, Fira Code or Consolas.
+
+### Navigating and reading code
+
+- **Command Palette** (`Ctrl+Shift+P`, Search > Command Palette...): every menu command (including the themes and
+  the Lines / Folding submenus) in one searchable list, ranked by the same fuzzy score as `Ctrl+P`, with each
+  command's shortcut on the right. With an empty search, the 8 commands you used last come first.
+- **Code folding**: hover the line-number gutter to see arrows next to every block of 3 or more lines; click one to
+  fold the block to its first line (a small "⋯" marks it), click again to open it. C-like code folds by bracket pairs
+  (the line with the closing `}` stays visible, so `} else {` never hides code); Python and scripts fold by
+  indentation. Arrow keys, clicks and scrolling skip folded blocks; moving the cursor into one (Go to Line, search,
+  the Outline) opens it. Folds move with the text when lines are added or removed above them.
+- **Outline** (`Ctrl+F12`, right side): namespaces, classes, structs, enums and functions of the current file as a
+  tree with coloured badges. Click to jump; the symbol around the cursor is highlighted; the box filters. Calls with
+  lambdas (`connect(...) {`), `if` / `for` blocks and `= {` initializers are not mistaken for functions. Python:
+  `def` and `class`. It is a reading of the text, not a full C++ parser, so unusual macros can be missed.
+- **Undo History** (`Ctrl+Shift+H`, right side): the undo and redo stacks as one timeline, oldest at the top
+  (`insert "hello"  line 3`); undone steps are dimmed. Click any row to undo or redo up to that point.
+- **Breadcrumbs**: the bar above the text shows `folder › file › class › function` for the cursor. A folder crumb
+  shows it in the Explorer, the file crumb opens a menu of every symbol in the file, a symbol crumb jumps to it.
+  Narrow windows drop crumbs from the left. Settings > Appearance or View > Breadcrumbs turns it off.
+- **Word wrap** (`Alt+Z`, View > Word Wrap, Settings; off by default): long lines continue on the next row,
+  breaking after the last space that fits, with no sideways scroll bar. Up / Down move one screen row and keep the
+  column; clicks, selection, search highlights, squiggles and folding all follow the wrapped rows. Off for files
+  over about 3 MB to keep typing fast.
 
 ### Welcome page
 
@@ -324,6 +363,13 @@ an offer to delete permanently when the drive has none.
 | Explorer filter | same fuzzy score + top-k as Ctrl+P over the cached file list | O(files x query x name length) |
 | Explorer move / rename of a folder with open tabs | each tab's path is compared with the folder path (prefix test) | O(tabs x path length) |
 | Line endings | the engine text has no `\r`; CRLF files are written back as CRLF | O(n) on open / save |
+| Command Palette | the Ctrl+P fuzzy score over the menu commands, top-k in a small sorted array; recent commands as a most-recently-used list | O(commands x query x name length) |
+| Fold ranges (`Folding.h`) | bracket pairs from the bracket checker, bucketed by their opening line (counting sort); scripts: a stack of open indentation blocks | O(lines + pairs) |
+| Folded lines <-> screen rows (`FoldSet`) | folded ranges merged into disjoint hidden intervals with prefix sums of hidden lines; binary search | O(log k) per lookup, k = folds |
+| Outline (`Outline.h`) | `{` pairs put in opening order by counting sort; each header classified by one scan; nesting from a `Stack` of open symbols | O(N + pairs) |
+| Undo History panel | reads the two undo / redo stacks with `Stack::peek`; jumping = repeated undo / redo | O(1) per row, O(steps) per jump |
+| Word wrap | first row of every line as prefix sums; row -> line by binary search; rebuilt lazily after an edit, a fold or a resize | O(log n) per lookup, O(N) per rebuild |
+| Terminal links (`findFileRefs`) | one left-to-right scan for `path:line[:col]` and Python `File "x", line N` | O(length of the line) |
 
 ## Complexity (phase 1)
 

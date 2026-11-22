@@ -43,9 +43,18 @@ public:
     // ANSI colour / style sequences turned into text formats; every other escape sequence is dropped.
     static void appendAnsi(QPlainTextEdit* edit, const QString& text);
 
+    // ---- clickable "file:line:col" in the output (engine findFileRefs) ----
+    // The reference under a point of the output's viewport. 'path' is made absolute against the
+    // terminal's folder. 'from' / 'to' (optional) get the span in the document, for underlining.
+    bool linkAt(const QPoint& viewportPos, QString* path, int* line, int* col, int* from = nullptr, int* to = nullptr) const;
+    // What a click on the reference in output line 'block' at column 'column' does (also used by tests).
+    bool openLinkAt(int block, int column);
+    QPlainTextEdit* output() const { return out_; }
+
 signals:
     void hideRequested();
     void directoryChanged(const QString& dir);
+    void openLocationRequested(const QString& path, int line, int col);   // a click on "file.cpp:12:5"
 
 protected:
     bool eventFilter(QObject*, QEvent*) override;
@@ -65,6 +74,10 @@ private:
     int historyPos_ = 0;
     QString draft_;
     bool needNewline_ = false;                         // output did not end with a newline yet
+    int hoverFrom_ = -1;                               // the underlined reference (document positions), -1 = none
+
+    bool refInBlock(int block, int column, QString* path, int* line, int* col, int* from, int* to) const;
+    void setHoverLink(int from, int to);
 
     void submit();
     bool builtin(const QString& line);

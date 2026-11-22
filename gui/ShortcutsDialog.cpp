@@ -19,6 +19,7 @@ const QList<ShortcutsDialog::Entry>& ShortcutsDialog::entries() {
         {"Tabs", "Close tab", {"Ctrl+W"}},
 
         {"Files and windows", "Go to file (fuzzy search)", {"Ctrl+P"}},
+        {"Files and windows", "Command palette: run any menu command by name", {"Ctrl+Shift+P"}},
         {"Files and windows", "Open file", {"Ctrl+O"}},
         {"Files and windows", "Open folder", {"Ctrl+Shift+O"}},
         {"Files and windows", "Save", {"Ctrl+S"}},
@@ -28,6 +29,9 @@ const QList<ShortcutsDialog::Entry>& ShortcutsDialog::entries() {
         {"Files and windows", "Show / hide sidebar", {"Ctrl+B"}},
         {"Files and windows", "Show / hide terminal", {"Ctrl+`"}},
         {"Files and windows", "Show / hide Problems", {"Ctrl+Shift+M"}},
+        {"Files and windows", "Show / hide Outline (symbols of the file)", {"Ctrl+F12"}},
+        {"Files and windows", "Show / hide Undo History", {"Ctrl+Shift+H"}},
+        {"Files and windows", "Word wrap on / off", {"Alt+Z"}},
         {"Files and windows", "Settings", {"Ctrl+,"}},
         {"Files and windows", "Switch between light and night theme", {"Ctrl+Shift+L"}},
         {"Files and windows", "Keyboard shortcuts", {"F1"}},
@@ -48,6 +52,8 @@ const QList<ShortcutsDialog::Entry>& ShortcutsDialog::entries() {
         {"Lines", "Outdent", {"Ctrl+[", "Shift+Tab"}},
         {"Lines", "Toggle comment", {"Ctrl+/"}},
         {"Lines", "Select line", {"Ctrl+L"}},
+        {"Lines", "Fold (collapse) the part around the cursor; or use the arrow in the margin", {"Ctrl+Shift+["}},
+        {"Lines", "Unfold (expand) the folded part at the cursor", {"Ctrl+Shift+]"}},
 
         {"Editing", "Undo", {"Ctrl+Z"}},
         {"Editing", "Redo", {"Ctrl+Y", "Ctrl+Shift+Z"}},

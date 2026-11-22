@@ -22,6 +22,8 @@
 #include "EditOps.h"
 #include "Editor.h"
 #include "FileIO.h"
+#include "Folding.h"
+#include "Outline.h"
 #include "Stack.h"
 #include "Workspace.h"
 
@@ -2737,6 +2739,240 @@ static void testDiagSyntaxCheck() {
     std::remove(broken.c_str());
 }
 
+// ------------------------------------------------------------------ folding, outline, history timeline
+
+// A Document holding 's' (Document itself cannot be copied, so it lives inside this wrapper).
+struct TextDoc {
+    Document doc;
+    explicit TextDoc(const std::string& s) { doc.insertText(Pos{0, 0}, s); }
+    operator const Document&() const { return doc; }
+};
+
+static const char* kOutlineSample =
+    "namespace app {\n"                 // 0
+    "class Foo : public Bar {\n"        // 1
+    "public:\n"                         // 2
+    "    Foo(int x) : x_(x) {\n"        // 3
+    "    }\n"                           // 4
+    "    ~Foo() {\n"                    // 5
+    "    }\n"                           // 6
+    "    int size() const {\n"          // 7
+    "        if (x_) {\n"               // 8
+    "            return 1;\n"           // 9
+    "        }\n"                       // 10
+    "        return 0;\n"               // 11
+    "    }\n"                           // 12
+    "};\n"                              // 13
+    "enum class Color : int {\n"        // 14
+    "    Red\n"                         // 15
+    "};\n"                              // 16
+    "}\n"                               // 17
+    "int Foo::area(int w,\n"            // 18
+    "              int h) {\n"          // 19
+    "    connect(a, b, [this]() {\n"    // 20
+    "        go();\n"                   // 21
+    "    });\n"                         // 22
+    "    return w * h;\n"               // 23
+    "}\n"                               // 24
+    "struct Point\n"                    // 25
+    "{\n"                               // 26
+    "    int x;\n"                      // 27
+    "};\n"                              // 28
+    "bool operator==(const A& a, const A& b) {\n"   // 29
+    "    return true;\n"                // 30
+    "}";                                // 31
+
+static const char* kPythonSample =
+    "class A:\n"
+    "    def f(self):\n"
+    "        return 1\n"
+    "\n"
+    "    def g(self):\n"
+    "        pass\n"
+    "x = 1";
+
+static void testFoldRanges() {
+    section("fold ranges");
+    const TextDoc d(kOutlineSample);
+    const DynArray<FoldRange> r = foldRangesFromBrackets(checkBrackets(d), d.doc.lineCount());
+    const size_t starts[] = {0, 1, 7, 8, 14, 19, 20, 26, 29};
+    const size_t lasts[] = {16, 12, 11, 9, 15, 23, 21, 27, 30};
+    CHECK(r.size() == 9);
+    for (size_t i = 0; i < r.size() && i < 9; ++i) CHECK(r[i].start == starts[i] && r[i].last == lasts[i]);
+    CHECK(foldRangeAt(r, 7) && foldRangeAt(r, 7)->last == 11);
+    CHECK(foldRangeAt(r, 3) == nullptr);                        // a two-line block has nothing to hide
+    CHECK(innermostFoldRange(r, 9) && innermostFoldRange(r, 9)->start == 8);
+    CHECK(innermostFoldRange(r, 11) && innermostFoldRange(r, 11)->start == 7);
+    CHECK(innermostFoldRange(r, 31) == nullptr);
+
+    const TextDoc py(kPythonSample);
+    const DynArray<FoldRange> p = foldRangesByIndent(py, 4);
+    CHECK(p.size() == 3);
+    if (p.size() == 3) CHECK(p[0].start == 0 && p[0].last == 5 && p[1].start == 1 && p[1].last == 2 && p[2].start == 4 && p[2].last == 5);
+    CHECK(foldRangesByIndent(TextDoc(""), 4).empty());
+    CHECK(foldRangesFromBrackets(checkBrackets(TextDoc("a\nb")), 2).empty());
+}
+
+static void testFoldSet() {
+    section("fold set");
+    FoldSet f;
+    CHECK(f.rowCount(20) == 20 && f.rowOf(7) == 7 && f.lineAt(7) == 7 && !f.isHidden(3));
+    CHECK(f.fold(FoldRange{2, 5}) && f.fold(FoldRange{10, 12}));
+    CHECK(!f.fold(FoldRange{2, 5}) && !f.fold(FoldRange{6, 6}));  // twice, or nothing to hide
+    CHECK(f.hiddenLines() == 5 && f.rowCount(20) == 15);
+    CHECK(f.isHidden(3) && f.isHidden(5) && !f.isHidden(2) && !f.isHidden(6) && f.isHidden(11) && !f.isHidden(13));
+    CHECK(f.rowOf(2) == 2 && f.rowOf(4) == 2 && f.rowOf(6) == 3 && f.rowOf(10) == 7 && f.rowOf(13) == 8);
+    CHECK(f.lineAt(2) == 2 && f.lineAt(3) == 6 && f.lineAt(7) == 10 && f.lineAt(8) == 13);
+    CHECK(f.nextVisible(2, 20) == 6 && f.prevVisible(6) == 2 && f.nextVisible(19, 20) == 19);
+    CHECK(f.fold(FoldRange{1, 8}));                              // a fold around a fold
+    CHECK(f.hiddenLines() == 9 && f.rowOf(9) == 2 && f.lineAt(2) == 9);
+    CHECK(f.unfold(1) && f.hiddenLines() == 5 && !f.unfold(1));
+    CHECK(f.reveal(4) && !f.isFolded(2) && f.isFolded(10) && !f.reveal(4));
+    f.linesChanged(0, 2);                                        // two lines added above: the fold moves down
+    CHECK(f.isFolded(12) && f.folds()[0].last == 14);
+    f.linesChanged(13, -1);                                      // a line removed inside it: it shrinks
+    CHECK(f.folds()[0].start == 12 && f.folds()[0].last == 13);
+    f.linesChanged(12, -1);                                      // header kept, block now empty: dropped
+    CHECK(f.empty() && f.hiddenLines() == 0);
+    f.fold(FoldRange{3, 9});
+    f.fold(FoldRange{12, 15});
+    DynArray<FoldRange> valid;
+    valid.push_back(FoldRange{3, 7});                            // after an edit: 3 is smaller, 12 is gone
+    f.keepOnly(valid);
+    CHECK(f.count() == 1 && f.folds()[0].last == 7 && f.hiddenLines() == 4);
+    f.clear();
+    CHECK(f.empty() && f.rowCount(5) == 5);
+}
+
+// Random folds against a model that marks every hidden line one by one.
+static void testFoldSetRandom() {
+    section("fold set (random, against a model)");
+    std::srand(4242);
+    bool ok = true;
+    for (int round = 0; round < 300 && ok; ++round) {
+        const size_t n = 5 + static_cast<size_t>(std::rand() % 60);
+        FoldSet f;
+        std::vector<std::pair<size_t, size_t>> model;
+        const int ops = 1 + std::rand() % 8;
+        for (int k = 0; k < ops; ++k) {
+            const size_t s = static_cast<size_t>(std::rand()) % (n - 1);
+            const size_t l = s + 1 + static_cast<size_t>(std::rand()) % (n - 1 - s);
+            if (std::rand() % 4 == 0 && !model.empty()) {
+                const size_t which = static_cast<size_t>(std::rand()) % model.size();
+                f.unfold(model[which].first);
+                model.erase(model.begin() + static_cast<long>(which));
+                continue;
+            }
+            bool dup = false;
+            for (auto& m : model) dup = dup || m.first == s;
+            if (f.fold(FoldRange{s, l}) != !dup) ok = false;
+            if (!dup) model.push_back({s, l});
+        }
+        std::vector<char> hidden(n, 0);
+        for (auto& m : model) for (size_t x = m.first + 1; x <= m.second; ++x) hidden[x] = 1;
+        std::vector<size_t> visible;
+        for (size_t x = 0; x < n; ++x) if (!hidden[x]) visible.push_back(x);
+        if (f.rowCount(n) != visible.size()) ok = false;
+        for (size_t row = 0; row < visible.size(); ++row) {
+            if (f.lineAt(row) != visible[row] || f.rowOf(visible[row]) != row) ok = false;
+        }
+        for (size_t x = 0; x < n; ++x) {
+            if ((f.isHidden(x) ? 1 : 0) != hidden[x]) ok = false;
+            if (hidden[x]) {                                     // maps to the visible line above the block
+                size_t h = x;
+                while (h > 0 && hidden[h]) --h;
+                if (f.lineAt(f.rowOf(x)) != h) ok = false;
+            }
+        }
+        if (!ok) std::cout << "  mismatch in round " << round << "\n";
+    }
+    CHECK(ok);
+}
+
+static void testOutline() {
+    section("outline");
+    const TextDoc d(kOutlineSample);
+    const DynArray<Symbol> s = outlineSymbols(d, checkBrackets(d));
+    const char* names[] = {"app", "Foo", "Foo", "~Foo", "size", "Color", "Foo::area", "Point", "operator=="};
+    const SymbolKind kinds[] = {SymbolKind::Namespace, SymbolKind::Class, SymbolKind::Function, SymbolKind::Function,
+                                SymbolKind::Function, SymbolKind::Enum, SymbolKind::Function, SymbolKind::Struct,
+                                SymbolKind::Function};
+    const size_t depths[] = {0, 1, 2, 2, 2, 1, 0, 0, 0};
+    CHECK(s.size() == 9);
+    if (s.size() != 9) {
+        for (size_t i = 0; i < s.size(); ++i) std::cout << "    got " << s[i].name << " depth " << s[i].depth << "\n";
+    }
+    for (size_t i = 0; i < s.size() && i < 9; ++i) CHECK(s[i].name == names[i] && s[i].kind == kinds[i] && s[i].depth == depths[i]);
+    if (s.size() == 9) {
+        CHECK(s[6].pos.line == 18 && s[6].pos.col == 4 && s[6].endLine == 24 && s[6].detail == "(int w, int h)");
+        CHECK(s[4].detail == "()" && s[1].pos.line == 1 && s[1].pos.col == 6);
+        CHECK(symbolAtLine(s, 9) == 4 && symbolAtLine(s, 21) == 6 && symbolAtLine(s, 15) == 5 && symbolAtLine(s, 2) == 1);
+    }
+    CHECK(std::string(symbolKindName(SymbolKind::Enum)) == "enum");
+    // calls, control flow and initializers are not symbols
+    const TextDoc calls("if (a) {\n}\nfor (;;) {\n}\nauto f = [](int x) {\n};\nint v[] = {\n1};\nfoo(1, [](){\n});\n");
+    CHECK(outlineSymbols(calls, checkBrackets(calls)).empty());
+
+    const TextDoc py(kPythonSample);
+    const DynArray<Symbol> p = outlineScriptSymbols(py, 4);
+    CHECK(p.size() == 3);
+    if (p.size() == 3) {
+        CHECK(p[0].name == "A" && p[0].kind == SymbolKind::Class && p[0].depth == 0 && p[0].endLine == 5);
+        CHECK(p[1].name == "f" && p[1].depth == 1 && p[1].endLine == 2 && p[1].detail == "(self)");
+        CHECK(p[2].name == "g" && p[2].depth == 1 && p[2].endLine == 5);
+    }
+}
+
+static void testFileRefs() {
+    section("file references in terminal output");
+    DynArray<FileRef> r = findFileRefs("main.cpp:12:5: error: expected ';'");
+    CHECK(r.size() == 1 && r[0].path == "main.cpp" && r[0].line == 12 && r[0].col == 5 && r[0].start == 0 && r[0].end == 13);
+    r = findFileRefs("In file included from src/gui/a.h:7,");
+    CHECK(r.size() == 1 && r[0].path == "src/gui/a.h" && r[0].line == 7 && r[0].col == 0 && r[0].start == 22);
+    r = findFileRefs("C:\\code\\x.cpp:3:1: warning: unused");
+    CHECK(r.size() == 1 && r[0].path == "C:\\code\\x.cpp" && r[0].line == 3 && r[0].col == 1 && r[0].start == 0);
+    r = findFileRefs("  File \"tools/run.py\", line 42, in main");
+    CHECK(r.size() == 1 && r[0].path == "tools/run.py" && r[0].line == 42 && r[0].start == 8);
+    r = findFileRefs("a.cpp:1:2: note: and b.h:30 too (c.hpp:4)");
+    CHECK(r.size() == 3 && r[1].path == "b.h" && r[1].line == 30 && r[2].path == "c.hpp" && r[2].line == 4);
+    // not files: times, URLs, ratios, names without an extension, line 0
+    CHECK(findFileRefs("started at 12:30:15").empty());
+    CHECK(findFileRefs("see http://example.com:8080/x").empty());
+    CHECK(findFileRefs("Makefile:3: *** missing separator").empty());
+    CHECK(findFileRefs("ratio 3.5:1 and v1.2:4").empty());
+    CHECK(findFileRefs("a.cpp:0: nothing").empty());
+    CHECK(findFileRefs("").empty());
+    FileRef hit;
+    CHECK(fileRefAt("x: main.cpp:9 here", 5, hit) && hit.path == "main.cpp" && hit.line == 9);
+    CHECK(!fileRefAt("x: main.cpp:9 here", 1, hit) && !fileRefAt("x: main.cpp:9 here", 15, hit));
+}
+
+static void testHistoryTimeline() {
+    section("undo history timeline");
+    Editor e;
+    e.insertText(Pos{0, 0}, "one");
+    e.insertText(Pos{0, 3}, " two");
+    e.insertText(Pos{0, 7}, " three");
+    CHECK(e.undoCount() == 3);
+    CHECK(e.undoStep(0).cmds[0].text == "one" && e.undoStep(2).cmds[0].text == " three");
+    CHECK(Editor::describeStep(e.undoStep(1)).find("\" two\"") != std::string::npos);
+    CHECK(Editor::describeStep(e.undoStep(1)).find("line 1") != std::string::npos);
+    Pos where;
+    CHECK(e.jumpToHistory(1, &where) == 2 && text(e.doc()) == "one" && e.undoCount() == 1 && e.redoCount() == 2);
+    CHECK(e.redoStep(0).cmds[0].text == " two" && e.redoStep(1).cmds[0].text == " three");
+    CHECK(e.jumpToHistory(3) == 2 && text(e.doc()) == "one two three" && e.redoCount() == 0);
+    CHECK(e.jumpToHistory(3) == 0);
+    CHECK(e.jumpToHistory(0) == 3 && text(e.doc()).empty());
+    CHECK(e.jumpToHistory(99) == 3 && text(e.doc()) == "one two three");   // clamps at the newest step
+    e.jumpToHistory(1);
+    e.insertText(Pos{0, 3}, "!");                                // a new edit drops the undone future
+    CHECK(e.undoCount() == 2 && e.redoCount() == 0 && text(e.doc()) == "one!");
+    Group multi;
+    multi.label = "replace all";
+    for (int i = 0; i < 4; ++i) multi.cmds.push_back(Command{});
+    CHECK(Editor::describeStep(multi).find("4 changes") != std::string::npos);
+}
+
 int main() {
     testDynArray();
     testStack();
@@ -2802,6 +3038,12 @@ int main() {
     testDiagParse();
     testDiagBracketsAndSquiggle();
     testDiagSyntaxCheck();
+    testFoldRanges();
+    testFoldSet();
+    testFoldSetRandom();
+    testOutline();
+    testHistoryTimeline();
+    testFileRefs();
 
     std::cout << "\n" << (g_checks - g_failed) << "/" << g_checks << " checks passed";
     if (g_failed) std::cout << "  (" << g_failed << " FAILED)";

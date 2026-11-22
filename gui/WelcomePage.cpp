@@ -150,6 +150,7 @@ WelcomePage::WelcomePage(QWidget* parent) : QWidget(parent) {
     right->addWidget(heading("Handy shortcuts", column));
     const char* keys[][2] = {
         {"Ctrl+P", "go to a file by name"},
+        {"Ctrl+Shift+P", "run any command by name"},
         {"Ctrl+B", "show or hide the Explorer"},
         {"Ctrl+F", "find (KMP search)"},
         {"Ctrl+Space", "autocomplete (Trie)"},

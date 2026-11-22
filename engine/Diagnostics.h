@@ -51,6 +51,21 @@ DynArray<Diagnostic> fromBrackets(const BracketReport& report);
 // past the end of the line gives 1: the GUI underlines the end-of-line spot).
 size_t squiggleLength(const std::string& line, size_t col0);
 
+// ---------------------------------------------------------------- file references in output
+
+// "main.cpp:12:5", "src/a.h:7", "C:\dir\b.cpp:3:1", and Python's  File "x.py", line 4  inside a line of
+// terminal output, so the terminal can make them clickable. start..end is the span to underline
+// (0-based, end exclusive), line / col are 1-based (col 0 = not given). A path needs a file
+// extension ("12:30" or "http://x:80" are not files). One left-to-right scan: O(length of the line).
+struct FileRef {
+    size_t start = 0, end = 0;
+    std::string path;
+    size_t line = 0, col = 0;
+};
+DynArray<FileRef> findFileRefs(const std::string& text);
+// The reference that covers column 'col' of 'text', if any.
+bool fileRefAt(const std::string& text, size_t col, FileRef& out);
+
 // Number of diagnostics of one severity.
 size_t countSeverity(const DynArray<Diagnostic>& list, Severity s);
 

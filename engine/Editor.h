@@ -100,6 +100,16 @@ public:
     size_t redoCount() const { return um_.redoCount(); }
     std::string nextUndoLabel() const { return um_.canUndo() ? um_.nextUndoLabel() : std::string(); }
     std::string nextRedoLabel() const { return um_.canRedo() ? um_.nextRedoLabel() : std::string(); }
+    // The history as a timeline (Undo History panel): undoStep(0) oldest ... undoStep(undoCount()-1)
+    // newest; redoStep(0) is what Redo applies next. See UndoManager.h.
+    const Group& undoStep(size_t i) const { return um_.undoStep(i); }
+    const Group& redoStep(size_t i) const { return um_.redoStep(i); }
+    // Undo or redo until exactly 'undoSteps' steps are on the undo stack (0 = the oldest state
+    // still in the history). One call per step, so every step is reversed exactly as Undo would.
+    // Returns how many steps were moved; 'where' gets the cursor position of the last one.
+    size_t jumpToHistory(size_t undoSteps, Pos* where = nullptr);
+    // Short text for one step: "insert \"hello\"  (line 3)".
+    static std::string describeStep(const Group& g);
     void setHistoryLimit(size_t steps) { um_.setLimit(steps); }
     size_t historyLimit() const { return um_.limit(); }
 

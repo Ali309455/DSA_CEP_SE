@@ -20,6 +20,7 @@ public:
         bool autoComplete = true;          // suggestions pop up while typing
         int cursorStyle = 0;               // 0 line, 1 block, 2 underline
         bool cursorBlink = true;
+        bool wordWrap = false;             // long lines continue on the next row instead of scrolling sideways (Alt+Z)
         // appearance
         QString theme = "midnight";        // one of Theme::schemeIds()
         QString accent = "blue";           // key into accentColor()
@@ -28,6 +29,7 @@ public:
         bool highlightLine = true;
         bool matchBrackets = true;
         bool statusBar = true;
+        bool breadcrumbs = true;           // folder > file > class > function bar above the text
         // terminal
         int terminalFontSize = 10;
         QString terminalShell;             // empty: cmd on Windows, $SHELL elsewhere

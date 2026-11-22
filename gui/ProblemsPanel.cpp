@@ -40,12 +40,11 @@ ProblemsPanel::ProblemsPanel(QWidget* parent) : QWidget(parent) {
 
     QWidget* head = new QWidget(this);
     head->setObjectName("terminalHeader");
-    head->setFixedHeight(34);
+    head->setFixedHeight(32);                              // same header as the terminal's, for a calm tab switch
     QHBoxLayout* h = new QHBoxLayout(head);
-    h->setContentsMargins(14, 0, 8, 0);
+    h->setContentsMargins(12, 0, 6, 0);
     h->setSpacing(8);
-    QLabel* title = new QLabel("PROBLEMS", head);
-    title->setObjectName("terminalTitle");
+    // (no "PROBLEMS" title: the tab above already says Problems)
     summary_ = new QLabel(head);
     summary_->setObjectName("terminalChip");
     summary_->setFixedHeight(20);
@@ -58,8 +57,7 @@ ProblemsPanel::ProblemsPanel(QWidget* parent) : QWidget(parent) {
     close->setFixedSize(26, 26);
     close->setToolTip("Hide panel");
     close->setFocusPolicy(Qt::NoFocus);
-    h->addWidget(title);
-    h->addWidget(summary_);
+    h->addWidget(summary_, 0, Qt::AlignVCenter);
     h->addSpacing(4);
     h->addWidget(status_, 1);
     h->addWidget(close);

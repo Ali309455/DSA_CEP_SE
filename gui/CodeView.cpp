@@ -12,6 +12,12 @@
 #include <QToolTip>
 #include "Theme.h"
 #include "SnippetStore.h"
+#include "Breadcrumbs.h"
+#include "Icons.h"
+#include <QDir>
+#include <QMenu>
+#include <climits>
+#include <functional>
 #include <QGuiApplication>
 #include <QInputMethodEvent>
 #include <QKeyEvent>
@@ -46,6 +52,7 @@ CodeView::CodeView(QWidget* parent) : QAbstractScrollArea(parent) {
     setFocusPolicy(Qt::StrongFocus);
     setAttribute(Qt::WA_InputMethodEnabled, true);
     viewport()->setCursor(Qt::IBeamCursor);
+    viewport()->setMouseTracking(true);                 // hover on the gutter shows the fold arrows
     viewport()->setAutoFillBackground(false);
     zoom_ = prefs().fontSize;
     fontFamily_ = prefs().fontFamily;
@@ -76,10 +83,16 @@ CodeView::CodeView(QWidget* parent) : QAbstractScrollArea(parent) {
     popup_->setStyleSheet(Theme::popupListStyle());
     connect(&Theme::notifier(), &Theme::Notifier::changed, this, [this]() {       // theme or accent changed: restyle and repaint
         popup_->setStyleSheet(Theme::popupListStyle());
+        if (crumbs_) { crumbs_->setCrumbs({}); refreshBreadcrumbs(); }            // the symbol badges use theme colours
         viewport()->update();
     });
     popup_->hide();
     connect(popup_, &QListWidget::itemClicked, this, [this]() { acceptCompletion(); });
+
+    crumbs_ = new Breadcrumbs(this);                     // sits in the top margin above the text
+    connect(crumbs_, &Breadcrumbs::crumbClicked, this, &CodeView::openBreadcrumb);
+    connect(this, &CodeView::stateChanged, this, &CodeView::refreshBreadcrumbs);
+    connect(this, &CodeView::outlineChanged, this, &CodeView::refreshBreadcrumbs);
 
     lastModified_ = false;
     recomputeBrackets();
@@ -121,32 +134,249 @@ void CodeView::applySettings() {
     if (s.cursorBlink) { if (!blink_.isActive()) blink_.start(); }
     else { blink_.stop(); cursorOn_ = true; }
     if (!s.autoComplete) { autoTimer_.stop(); hidePopup(); }
+    invalidateRows();                                             // word wrap on / off, tab width, gutter width
+    if (!s.wordWrap) maxCols_ = 0;                                // measure again for the sideways scroll bar
     if (fontChanged) applyFont();                                 // also redoes the gutter and scroll bars
     else { updateGutter(); updateScrollBars(); }
+    refreshBreadcrumbs();                                         // shown or hidden
+    ensureCursorVisible();
     viewport()->update();
+}
+
+// ---------------------------------------------------------------- breadcrumbs
+
+static QString& breadcrumbRoot() { static QString root; return root; }
+
+void CodeView::setBreadcrumbRoot(const QString& dir) { breadcrumbRoot() = dir; }
+
+void CodeView::refreshBreadcrumbs() {
+    if (!crumbs_) return;
+    const bool on = prefs().breadcrumbs;
+    const int top = on ? Breadcrumbs::barHeight() : 0;
+    if (viewportMargins().top() != top) setViewportMargins(0, top, 0, 0);
+    crumbs_->setVisible(on);
+    if (!on) return;
+    crumbs_->setGeometry(viewport()->x(), 0, viewport()->width(), top);
+
+    using Crumb = Breadcrumbs::Crumb;
+    QVector<Crumb> c;
+    const QString path = QString::fromStdString(ed_.doc().path());
+    if (path.isEmpty()) {
+        Crumb f;
+        f.text = "Untitled";
+        f.icon = Icons::forFile("untitled.txt");
+        f.kind = Breadcrumbs::File;
+        c << f;
+    } else {
+        // inside the open folder: the path from there; otherwise the file's own folder and the file
+        const QString root = breadcrumbRoot();
+        QString rel = root.isEmpty() ? QString() : QDir(root).relativeFilePath(path);
+        QString base = root;
+        if (rel.isEmpty() || rel.startsWith("..") || QDir::isAbsolutePath(rel)) {
+            const QFileInfo fi(path);
+            rel = fi.dir().dirName() + "/" + fi.fileName();
+            base = QFileInfo(fi.absolutePath()).absolutePath();
+        }
+        const QStringList parts = rel.split('/', Qt::SkipEmptyParts);
+        QString acc = base;
+        for (int i = 0; i + 1 < parts.size(); ++i) {
+            acc = QDir(acc).filePath(parts[i]);
+            Crumb f;
+            f.text = parts[i];
+            f.icon = Icons::folder(false);
+            f.kind = Breadcrumbs::Folder;
+            f.path = acc;
+            c << f;
+        }
+        Crumb f;
+        f.text = parts.isEmpty() ? QFileInfo(path).fileName() : parts.last();
+        f.icon = Icons::forFile(f.text);
+        f.kind = Breadcrumbs::File;
+        f.path = path;
+        c << f;
+    }
+    // the symbols around the cursor, outermost first (symbols are in document order, so a parent comes first)
+    for (size_t i = 0; i < symbols_.size(); ++i) {
+        const Symbol& s = symbols_[i];
+        if (s.pos.line > cur_.line || cur_.line > s.endLine) continue;
+        Crumb f;
+        f.text = QString::fromStdString(s.name) + (s.kind == SymbolKind::Function ? "()" : "");
+        f.icon = Icons::forSymbol(s.kind);
+        f.kind = Breadcrumbs::Symbol;
+        f.symbol = static_cast<long>(i);
+        c << f;
+    }
+    crumbs_->setCrumbs(c);
+}
+
+void CodeView::openBreadcrumb(int index, const QPoint& globalBelow) {
+    const QVector<Breadcrumbs::Crumb>& cs = crumbs_->crumbs();
+    if (index < 0 || index >= cs.size()) return;
+    const Breadcrumbs::Crumb& c = cs[index];
+    auto jump = [this](size_t i) {
+        if (i >= symbols_.size()) return;
+        goToLine(static_cast<int>(symbols_[i].pos.line) + 1);
+        setCursor(symbols_[i].pos);
+        setFocus();
+    };
+    if (c.kind == Breadcrumbs::Folder) { emit revealInExplorer(c.path); return; }
+    if (c.kind == Breadcrumbs::Symbol) { jump(static_cast<size_t>(c.symbol)); return; }
+    // the file: a menu of everything in it, nested like the Outline
+    QMenu menu(this);
+    if (symbols_.empty()) menu.addAction("No classes or functions in this file")->setEnabled(false);
+    for (size_t i = 0; i < symbols_.size(); ++i) {
+        const Symbol& s = symbols_[i];
+        QAction* a = menu.addAction(Icons::forSymbol(s.kind), QString(static_cast<int>(s.depth) * 3, QLatin1Char(' ')) +
+                                                                  QString::fromStdString(s.name + s.detail));
+        a->setData(static_cast<qulonglong>(i));
+    }
+    if (QAction* chosen = menu.exec(globalBelow); chosen && chosen->data().isValid()) jump(chosen->data().toULongLong());
 }
 
 void CodeView::updateGutter() {
     int digits = 3;
     for (size_t n = ed_.doc().lineCount(); n >= 1000; n /= 10) ++digits;
-    gutterW_ = prefs().lineNumbers ? digits * charW_ + 22 : 16;
+    gutterW_ = prefs().lineNumbers ? digits * charW_ + 30 : 22;     // the last 16 pixels hold the fold arrows
 }
 
 int CodeView::visibleLines() const { return std::max(1, viewport()->height() / lineH_); }
 
+// ---------------------------------------------------------------- rows: folding and word wrap
+//
+// A "row" is one line of pixels on screen. Without word wrap a visible line is one row and the
+// FoldSet maps rows to lines. With word wrap a line takes as many rows as it needs, so the rows are
+// kept as prefix sums:  rowStart_[l] = first row of line l  (a folded line adds 0 rows), and
+// rowStart_[lineCount] = all rows. Line of a row = binary search, O(log n). The array is rebuilt in
+// one O(characters) pass when the text, the folds or the width changed, and only when it is used.
+
+bool CodeView::wrapOn() const { return prefs().wordWrap && ed_.doc().charCount() <= 3000000; }
+
+int CodeView::wrapCols() const { return std::max(20, (viewport()->width() - textLeft() - charW_) / std::max(1, charW_)); }
+
+// Row starts of one line (tabs already expanded). Breaks after the last space that fits, or in the
+// middle of a word that is longer than a whole row. Without wrap: one row starting at column 0.
+void CodeView::wrapStarts(const QString& s, std::vector<int>& st) const {
+    st.assign(1, 0);
+    if (!wrapOn()) return;
+    const int cols = wrapCols();
+    int start = 0;
+    while (s.size() - start > cols) {
+        int brk = -1;
+        for (int j = start + cols; j > start + cols / 3; --j)
+            if (s[j - 1] == QLatin1Char(' ') && s[j] != QLatin1Char(' ')) { brk = j; break; }
+        if (brk < 0) brk = start + cols;
+        st.push_back(brk);
+        start = brk;
+    }
+}
+
+int CodeView::segOf(const std::vector<int>& st, int dcol) {
+    int lo = 0, hi = static_cast<int>(st.size()) - 1;      // the last row start <= dcol
+    while (lo < hi) {
+        const int mid = (lo + hi + 1) / 2;
+        if (st[static_cast<size_t>(mid)] <= dcol) lo = mid; else hi = mid - 1;
+    }
+    return lo;
+}
+
+void CodeView::lineSegments(size_t line, std::vector<int>& st) const { wrapStarts(expandTabs(lineText(line)), st); }
+
+void CodeView::ensureRows() const {
+    const size_t n = ed_.doc().lineCount();
+    const int cols = wrapCols();
+    if (!rowsDirty_ && rowsCols_ == cols && rowStart_.size() == n + 1) return;
+    rowStart_.clear();
+    rowStart_.reserve(n + 1);
+    std::vector<int> st;
+    size_t total = 0;
+    for (size_t l = 0; l < n; ++l) {
+        rowStart_.push_back(total);
+        if (folds_.isHidden(l)) continue;
+        lineSegments(l, st);
+        total += st.size();
+    }
+    rowStart_.push_back(total);
+    rowsDirty_ = false;
+    rowsCols_ = cols;
+}
+
+size_t CodeView::rowOf(size_t line) const {
+    if (!wrapOn()) return folds_.rowOf(line);
+    ensureRows();
+    const size_t n = ed_.doc().lineCount();
+    if (line >= n) line = n - 1;
+    if (folds_.isHidden(line)) line = folds_.lineAt(folds_.rowOf(line));    // the header above its block
+    return rowStart_[line];
+}
+
+size_t CodeView::lineAtRow(size_t row) const {
+    const size_t n = ed_.doc().lineCount();
+    if (!wrapOn()) return std::min(folds_.lineAt(row), n - 1);
+    ensureRows();
+    if (row >= rowStart_[n]) row = rowStart_[n] - 1;
+    size_t lo = 0, hi = n - 1;                             // the first line whose rows end after 'row'
+    while (lo < hi) {
+        const size_t mid = (lo + hi) / 2;
+        if (rowStart_[mid + 1] <= row) lo = mid + 1; else hi = mid;
+    }
+    return lo;
+}
+
+size_t CodeView::visibleRowCount() const {
+    if (!wrapOn()) return folds_.rowCount(ed_.doc().lineCount());
+    ensureRows();
+    return std::max<size_t>(1, rowStart_[ed_.doc().lineCount()]);
+}
+
+size_t CodeView::cursorRow() const {
+    size_t r = rowOf(cur_.line);
+    if (wrapOn()) {
+        std::vector<int> st;
+        lineSegments(cur_.line, st);
+        r += static_cast<size_t>(segOf(st, displayColumn(cur_)));
+    }
+    return r;
+}
+
+QPoint CodeView::cursorPixel() const {
+    int dc = displayColumn(cur_);
+    if (wrapOn()) {
+        std::vector<int> st;
+        lineSegments(cur_.line, st);
+        dc -= st[static_cast<size_t>(segOf(st, dc))];
+    }
+    const size_t row = cursorRow();
+    const int x = textLeft() - (wrapOn() ? 0 : horizontalScrollBar()->value()) + dc * charW_;
+    const int y = row >= firstVisible() ? static_cast<int>(row - firstVisible()) * lineH_ : 0;
+    return QPoint(x, y);
+}
+
+// Where the cursor goes on 'row' when it wants to be 'x' columns into the row (Up / Down / Page keys).
+Pos CodeView::posAtRow(size_t row, int x) const {
+    const size_t line = lineAtRow(row);
+    std::vector<int> st;
+    lineSegments(line, st);
+    const size_t first = rowOf(line);
+    const int k = std::min(static_cast<int>(row > first ? row - first : 0), static_cast<int>(st.size()) - 1);
+    int dc = st[static_cast<size_t>(k)] + std::max(0, x);
+    if (k + 1 < static_cast<int>(st.size())) dc = std::min(dc, st[static_cast<size_t>(k) + 1] - 1);   // stay on this row
+    return Pos{line, byteColFor(lineText(line), dc)};
+}
+
 void CodeView::updateScrollBars() {
-    const int total = static_cast<int>(ed_.doc().lineCount());
+    const int total = static_cast<int>(visibleRowCount());
     verticalScrollBar()->setRange(0, std::max(0, total - 1));
     verticalScrollBar()->setPageStep(visibleLines());
     const int contentW = textLeft() + (maxCols_ + 4) * charW_;
-    horizontalScrollBar()->setRange(0, std::max(0, contentW - viewport()->width()));
+    horizontalScrollBar()->setRange(0, wrapOn() ? 0 : std::max(0, contentW - viewport()->width()));   // wrapped: nothing to the side
     horizontalScrollBar()->setPageStep(viewport()->width());
     horizontalScrollBar()->setSingleStep(charW_ * 3);
 }
 
 void CodeView::resizeEvent(QResizeEvent* e) {
     QAbstractScrollArea::resizeEvent(e);
-    updateScrollBars();
+    if (crumbs_) crumbs_->setGeometry(viewport()->x(), 0, viewport()->width(), viewport()->y());
+    updateScrollBars();                                    // with word wrap the width decides the rows
 }
 
 // ---------------------------------------------------------------- text helpers
@@ -235,12 +465,29 @@ Pos CodeView::clamp(Pos p) const {
     return p;
 }
 
-Pos CodeView::pointToPos(const QPoint& pt) const {
+// The line and display column under a viewport point ('shift' pixels added to x: half a character
+// for clicks, so a click on the right half of a character lands after it).
+void CodeView::cellAt(const QPoint& pt, int shift, size_t& line, int& dcol) const {
     const Document& d = ed_.doc();
-    int row = pt.y() < 0 ? 0 : pt.y() / lineH_;
-    size_t line = std::min(firstVisible() + static_cast<size_t>(row), d.lineCount() - 1);
-    int x = pt.x() - textLeft() + horizontalScrollBar()->value() + charW_ / 2;
-    int dcol = x < 0 ? 0 : x / charW_;
+    const int rowOnScreen = pt.y() < 0 ? 0 : pt.y() / lineH_;
+    const size_t r = std::min(firstVisible() + static_cast<size_t>(rowOnScreen), visibleRowCount() - 1);
+    line = std::min(lineAtRow(r), d.lineCount() - 1);
+    const int x = pt.x() - textLeft() + (wrapOn() ? 0 : horizontalScrollBar()->value()) + shift;
+    dcol = x < 0 ? 0 : x / charW_;
+    if (wrapOn()) {                                        // which of the line's rows, then columns into that row
+        std::vector<int> st;
+        lineSegments(line, st);
+        const size_t firstRow = rowOf(line);
+        const int k = std::min(static_cast<int>(r > firstRow ? r - firstRow : 0), static_cast<int>(st.size()) - 1);
+        dcol += st[static_cast<size_t>(k)];
+        if (k + 1 < static_cast<int>(st.size())) dcol = std::min(dcol, st[static_cast<size_t>(k) + 1] - 1);
+    }
+}
+
+Pos CodeView::pointToPos(const QPoint& pt) const {
+    size_t line = 0;
+    int dcol = 0;
+    cellAt(pt, charW_ / 2, line, dcol);
     return Pos{line, byteColFor(lineText(line), dcol)};
 }
 
@@ -257,11 +504,17 @@ void CodeView::lineRangeOfSelection(size_t& from, size_t& to) const {
 }
 
 void CodeView::ensureCursorVisible() {
+    // the cursor never sits in a folded block: going there (search, Go to Line, a click on the
+    // Outline, typing after Undo) opens the folds around it
+    bool opened = folds_.reveal(cur_.line);
+    if (anchor_.line != cur_.line) opened = folds_.reveal(anchor_.line) || opened;
+    if (opened) { invalidateRows(); updateScrollBars(); }
     const int vis = visibleLines();
-    const int line = static_cast<int>(cur_.line);
+    const int line = static_cast<int>(cursorRow());
     QScrollBar* v = verticalScrollBar();
     if (line < v->value()) v->setValue(line);
     else if (line >= v->value() + vis - 1) v->setValue(std::max(0, line - vis + 2));
+    if (wrapOn()) return;                                  // wrapped text never needs sideways scrolling
     const int x = displayColumn(cur_) * charW_;
     QScrollBar* h = horizontalScrollBar();
     const int avail = viewport()->width() - textLeft();
@@ -286,6 +539,9 @@ bool CodeView::openFile(const QString& path, QString* error) {
     horizontalScrollBar()->setValue(0);
     compilerDiags_.clear();
     lastLineCount_ = ed_.doc().lineCount();
+    folds_.clear();
+    foldRanges_.clear();
+    foldLineCount_ = ed_.doc().lineCount();
     edited(0);
     return true;
 }
@@ -321,6 +577,7 @@ QString CodeView::languageName() const {
 void CodeView::setCursor(Pos p) {
     cur_ = anchor_ = clamp(p);
     wantCol_ = displayColumn(cur_);
+    wantX_ = -1;
     ed_.breakTyping();
     ensureCursorVisible();
     cursorOn_ = true;
@@ -332,6 +589,7 @@ void CodeView::select(Pos a, Pos b) {
     anchor_ = clamp(a);
     cur_ = clamp(b);
     wantCol_ = displayColumn(cur_);
+    wantX_ = -1;
     ed_.breakTyping();
     ensureCursorVisible();
     cursorOn_ = true;
@@ -343,7 +601,101 @@ void CodeView::goToLine(int line1) {
     const int n = static_cast<int>(ed_.doc().lineCount());
     const int l = std::max(1, std::min(n, line1)) - 1;
     setCursor(Pos{static_cast<size_t>(l), 0});
-    verticalScrollBar()->setValue(std::max(0, l - visibleLines() / 2));
+    verticalScrollBar()->setValue(std::max(0, static_cast<int>(rowOf(static_cast<size_t>(l))) - visibleLines() / 2));
+}
+
+// ---------------------------------------------------------------- folding
+
+void CodeView::shiftFolds(size_t fromLine) {
+    const size_t n = ed_.doc().lineCount();
+    const long delta = static_cast<long>(n) - static_cast<long>(foldLineCount_);
+    foldLineCount_ = n;
+    if (delta != 0) folds_.linesChanged(fromLine, delta);
+}
+
+// After folding: a cursor inside a block that just closed moves to the end of the block's header.
+void CodeView::moveCursorOutOfFolds() {
+    const Document& d = ed_.doc();
+    if (folds_.isHidden(cur_.line)) {
+        const size_t h = lineAtRow(rowOf(cur_.line));
+        cur_ = Pos{h, d.lineLength(h)};
+    }
+    if (folds_.isHidden(anchor_.line)) anchor_ = cur_;
+}
+
+void CodeView::foldsChanged() {
+    moveCursorOutOfFolds();
+    wantCol_ = displayColumn(cur_);
+    wantX_ = -1;
+    invalidateRows();
+    updateScrollBars();
+    ensureCursorVisible();
+    emit stateChanged();
+    viewport()->update();
+}
+
+bool CodeView::toggleFold(size_t line) {
+    if (dirtyBrackets_) recomputeBrackets();             // the ranges must match the text as it is now
+    if (line >= ed_.doc().lineCount()) return false;
+    if (folds_.isFolded(line)) {
+        folds_.unfold(line);
+    } else {
+        const FoldRange* r = foldRangeAt(foldRanges_, line);
+        if (!r) r = innermostFoldRange(foldRanges_, line);
+        if (!r || !folds_.fold(*r)) return false;
+    }
+    foldsChanged();
+    return true;
+}
+
+void CodeView::foldAtCursor() {
+    if (dirtyBrackets_) recomputeBrackets();
+    const FoldRange* r = foldRangeAt(foldRanges_, cur_.line);
+    if (!r || folds_.isFolded(r->start)) r = innermostFoldRange(foldRanges_, cur_.line);
+    // on the header of a folded block, or in a block whose innermost range is folded: take the next one out
+    while (r && folds_.isFolded(r->start)) {
+        const FoldRange* outer = nullptr;
+        for (size_t i = 0; i < foldRanges_.size() && foldRanges_[i].start < r->start; ++i)
+            if (foldRanges_[i].last >= r->last && (!outer || foldRanges_[i].start > outer->start)) outer = &foldRanges_[i];
+        r = outer;
+    }
+    if (!r) { emit statusMessage("Nothing to fold here."); return; }
+    folds_.fold(*r);
+    foldsChanged();
+}
+
+void CodeView::unfoldAtCursor() {
+    if (folds_.unfold(cur_.line)) { foldsChanged(); return; }
+    // inside an open block of a folded parent is impossible (the cursor is never hidden), so: the
+    // innermost folded block whose header is this line or above it
+    for (size_t i = folds_.count(); i-- > 0;) {
+        const FoldRange r = folds_.folds()[i];
+        if (r.start <= cur_.line && cur_.line <= r.last + 1) { folds_.unfold(r.start); foldsChanged(); return; }
+    }
+    emit statusMessage("Nothing folded here.");
+}
+
+void CodeView::foldAll() {
+    if (dirtyBrackets_) recomputeBrackets();
+    for (size_t i = 0; i < foldRanges_.size(); ++i) folds_.fold(foldRanges_[i]);
+    foldsChanged();
+}
+
+void CodeView::unfoldAll() {
+    if (folds_.empty()) return;
+    folds_.clear();
+    foldsChanged();
+}
+
+void CodeView::jumpToHistory(size_t undoSteps) {
+    Pos where;
+    hidePopup();
+    if (ed_.jumpToHistory(undoSteps, &where) == 0) return;
+    cur_ = anchor_ = clamp(where);
+    blockValid_ = 0;
+    compilerDiags_.clear();
+    shiftFolds(cur_.line);
+    edited(0);
 }
 
 void CodeView::setSearchHighlights(const std::vector<Match>& m) {
@@ -443,17 +795,24 @@ void CodeView::collectSquiggles(size_t fromLine, size_t toLine, std::vector<Squi
 }
 
 bool CodeView::viewportEvent(QEvent* e) {
+    if (e->type() == QEvent::Leave && gutterHover_) {
+        gutterHover_ = false;
+        viewport()->setCursor(Qt::IBeamCursor);
+        viewport()->update();
+    }
     if (e->type() == QEvent::ToolTip) {
         QHelpEvent* he = static_cast<QHelpEvent*>(e);
         QString tip;
         const QPoint pt = he->pos();
         if (pt.x() >= gutterW_ && lineH_ > 0 && charW_ > 0) {
-            const size_t l = firstVisible() + static_cast<size_t>(pt.y() / lineH_);
+            const size_t row = firstVisible() + static_cast<size_t>(pt.y() / lineH_);
+            size_t l = ed_.doc().lineCount();
+            int dc = 0;
+            if (row < visibleRowCount()) cellAt(pt, 0, l, dc);
             if (l < ed_.doc().lineCount()) {
                 std::vector<Squig> sq;
                 collectSquiggles(l, l + 1, sq);
                 const std::string raw = lineText(l);
-                const int dc = (pt.x() - textLeft() + horizontalScrollBar()->value()) / charW_;
                 for (const Squig& q : sq) {
                     const int a = displayCol(raw, q.col);
                     int b = displayCol(raw, std::min(raw.size(), q.col + q.len));
@@ -512,10 +871,13 @@ void CodeView::expandSnippet() {
 void CodeView::edited(size_t fromLine) {
     ++revision_;
     shiftDiagnostics(fromLine, ed_.doc().lineCount());
+    shiftFolds(fromLine);
     dirtyBrackets_ = true;
     bracketTimer_.start(80);
     blockValid_ = std::min(blockValid_, fromLine + 1);
     wantCol_ = displayColumn(cur_);
+    wantX_ = -1;
+    invalidateRows();                                      // word wrap: line lengths changed
     updateGutter();
     updateScrollBars();
     ensureCursorVisible();
@@ -534,6 +896,23 @@ void CodeView::recomputeBrackets() {
         const DynArray<Diagnostic> b = fromBrackets(report_);
         for (size_t i = 0; i < b.size(); ++i) bracketDiags_.push_back(b[i]);
     }
+    // fold ranges and outline come from the same scan: brackets for code, indentation for scripts
+    const Document& doc = ed_.doc();
+    if (language_ == 0) {
+        foldRanges_ = foldRangesFromBrackets(report_, doc.lineCount());
+        symbols_ = outlineSymbols(doc, report_);
+    } else if (language_ == 1 && doc.charCount() <= 4000000) {
+        foldRanges_ = foldRangesByIndent(doc, static_cast<size_t>(tabWidth_));
+        symbols_ = outlineScriptSymbols(doc, static_cast<size_t>(tabWidth_));
+    } else {
+        foldRanges_.clear();
+        symbols_.clear();
+    }
+    foldLineCount_ = doc.lineCount();
+    const size_t hiddenBefore = folds_.hiddenLines();
+    folds_.keepOnly(foldRanges_);
+    if (folds_.hiddenLines() != hiddenBefore) { moveCursorOutOfFolds(); invalidateRows(); updateScrollBars(); }
+    emit outlineChanged();
     emit diagnosticsChanged();
     emit stateChanged();
     viewport()->update();
@@ -547,11 +926,38 @@ static const QSet<QString>& keywordSet() {
         "class", "struct", "union", "enum", "namespace", "template", "typename", "using", "typedef", "public",
         "private", "protected", "virtual", "override", "final", "static", "const", "constexpr", "volatile",
         "inline", "explicit", "friend", "operator", "new", "delete", "try", "catch", "throw", "noexcept",
-        "this", "nullptr", "true", "false", "sizeof", "extern", "mutable", "register", "static_cast",
+        "this", "sizeof", "extern", "mutable", "register", "static_cast",
         "dynamic_cast", "reinterpret_cast", "const_cast", "decltype", "import", "from", "def", "lambda", "elif",
-        "pass", "None", "True", "False", "function", "var", "let", "async", "await", "package", "interface",
+        "pass", "function", "var", "let", "async", "await", "package", "interface", "self",
         "extends", "implements", "fn", "pub", "impl", "match", "mod", "in", "is", "not", "and", "or"};
     return s;
+}
+
+// Literal values: their own colour (the "constant" syntax colour), like ALL_CAPS names.
+static const QSet<QString>& constantSet() {
+    static const QSet<QString> s = {"true", "false", "nullptr", "NULL", "None", "True", "False", "null", "undefined", "nil"};
+    return s;
+}
+
+// MAX_SIZE, EOF, PI: an upper-case name of 2+ characters with no lower-case letters.
+static bool isAllCaps(const QString& w) {
+    if (w.size() < 2) return false;
+    bool letter = false;
+    for (const QChar ch : w) {
+        if (ch.isLower()) return false;
+        letter = letter || ch.isUpper();
+    }
+    return letter;
+}
+
+static bool isOperatorChar(QChar c) {
+    switch (c.unicode()) {
+        case '+': case '-': case '*': case '/': case '%': case '=': case '<': case '>':
+        case '!': case '&': case '|': case '^': case '~': case '?': case ':':
+            return true;
+        default:
+            return false;
+    }
 }
 
 static const QSet<QString>& typeSet() {
@@ -621,8 +1027,21 @@ void CodeView::tokenize(const QString& s, bool& inBlock, std::vector<Span>& out)
             int j = i + 1;
             while (j < n && (s[j].isLetterOrNumber() || s[j] == QLatin1Char('_'))) ++j;
             const QString w = s.mid(i, j - i);
+            int k = j;                                       // what follows the name decides "function call"
+            while (k < n && s[k] == QLatin1Char(' ')) ++k;
             if (keywordSet().contains(w)) out.push_back({i, j - i, cKeyword});
             else if (typeSet().contains(w)) out.push_back({i, j - i, cType});
+            else if (constantSet().contains(w) || isAllCaps(w)) out.push_back({i, j - i, cConstant});
+            else if (k < n && s[k] == QLatin1Char('(')) out.push_back({i, j - i, cFunction});   // foo(...)
+            else if (w[0].isUpper() && language_ == 0) out.push_back({i, j - i, cType});        // class names: CodeView, Pos
+            i = j;
+            onlyBlanksBefore = false;
+            continue;
+        }
+        if (language_ != 2 && isOperatorChar(c)) {           // + - * / = < > ! & | ^ ~ ? : and runs of them (->, ::, <=)
+            int j = i + 1;
+            while (j < n && isOperatorChar(s[j])) ++j;
+            out.push_back({i, j - i, cOperator});
             i = j;
             onlyBlanksBefore = false;
             continue;
@@ -660,9 +1079,14 @@ void CodeView::paintEvent(QPaintEvent*) {
     const QFontMetrics fm(font());
     const int ascent = fm.ascent() + (lineH_ - fm.height()) / 2;
 
-    const size_t first = std::min(firstVisible(), doc.lineCount() - 1);
-    const size_t last = std::min(doc.lineCount(), first + static_cast<size_t>(visibleLines()) + 2);
-    const int xOff = horizontalScrollBar()->value();
+    // rows on screen, and the document lines they show (folded blocks are skipped; with word wrap
+    // one line can take several rows, and the first line may start above the top edge)
+    const size_t rows = visibleRowCount();
+    const size_t firstRow = std::min(firstVisible(), rows - 1);
+    const size_t lastRow = std::min(rows, firstRow + static_cast<size_t>(visibleLines()) + 2);
+    const size_t first = lineAtRow(firstRow);
+    const size_t last = std::min(doc.lineCount(), lineAtRow(lastRow - 1) + 1);
+    const int xOff = wrapOn() ? 0 : horizontalScrollBar()->value();
     const int left = textLeft() - xOff;
     ensureBlockState(first);
     bool inBlock = first < blockAtStart_.size() && blockAtStart_[first] != 0;
@@ -687,32 +1111,59 @@ void CodeView::paintEvent(QPaintEvent*) {
     collectSquiggles(first, last, squigs);
 
     std::vector<Span> spans;
-    for (size_t l = first; l < last; ++l) {
-        const int y = static_cast<int>(l - first) * lineH_;
+    std::vector<int> st;                               // where each row of the current line starts (display columns)
+    std::vector<std::pair<size_t, int>> shown;         // (line, y of its first row), for the gutter
+    const size_t n = doc.lineCount();
+    size_t prevLine = first;
+    size_t l = first;
+    int y = (static_cast<int>(rowOf(first)) - static_cast<int>(firstRow)) * lineH_;
+    while (l < n && y < vh) {
+        if (l != first && l != prevLine + 1) {               // jumped over a folded block: its comment state
+            ensureBlockState(l);
+            inBlock = l < blockAtStart_.size() && blockAtStart_[l] != 0;
+        }
+        prevLine = l;
         const std::string raw = lineText(l);
         const QString s = expandTabs(raw);
-        if (s.size() > maxCols_) { maxCols_ = s.size(); updateScrollBars(); }
+        if (!wrapOn() && s.size() > maxCols_) { maxCols_ = s.size(); updateScrollBars(); }
+        wrapStarts(s, st);
+        const int segs = static_cast<int>(st.size());
+        shown.push_back({l, y});
 
-        if (l == cur_.line && !sel && prefs().highlightLine) p.fillRect(gutterW_, y, vw - gutterW_, lineH_, kCurLine);
+        // display column -> pixel; a range of columns -> one rectangle per row it covers
+        auto segOfCol = [&](int dc) { return segOf(st, dc); };
+        auto xAt = [&](int dc) { const int k = segOfCol(dc); return left + (dc - st[static_cast<size_t>(k)]) * charW_; };
+        auto yAt = [&](int dc) { return y + segOfCol(dc) * lineH_; };
+        // calls fn(c0, c1, x0, x1, y) for every row that columns [a, b) touch: the part c0..c1 on that row
+        auto forRows = [&](int a, int b, const std::function<void(int, int, int, int, int)>& fn) {
+            for (int k = 0; k < segs; ++k) {
+                const int s0 = st[static_cast<size_t>(k)], s1 = (k + 1 < segs) ? st[static_cast<size_t>(k) + 1] : INT_MAX;
+                const int c0 = std::max(a, s0), c1 = std::min(b, s1);
+                if (c0 >= c1) continue;
+                fn(c0, c1, left + (c0 - s0) * charW_, left + (c1 - s0) * charW_, y + k * lineH_);
+            }
+        };
+
+        if (l == cur_.line && !sel && prefs().highlightLine) p.fillRect(gutterW_, y, vw - gutterW_, lineH_ * segs, kCurLine);
 
         for (size_t k = hi; k < highlights_.size() && highlights_[k].start.line <= l; ++k) {
             const Match& m = highlights_[k];
             if (m.end.line < l) continue;
             const int a = (m.start.line == l) ? displayCol(raw, m.start.col) : 0;
             const int b = (m.end.line == l) ? displayCol(raw, m.end.col) : static_cast<int>(s.size());
-            p.fillRect(left + a * charW_, y, std::max(1, b - a) * charW_, lineH_, kFind);
+            forRows(a, std::max(a + 1, b), [&](int, int, int x0, int x1, int yy) { p.fillRect(x0, yy, std::max(charW_, x1 - x0), lineH_, kFind); });
         }
 
         if (sel && l >= ss.line && l <= se.line) {
             const int a = (l == ss.line) ? displayCol(raw, ss.col) : 0;
             const int b = (l == se.line) ? displayCol(raw, se.col) : static_cast<int>(s.size()) + 1;
-            p.fillRect(left + a * charW_, y, std::max(0, b - a) * charW_, lineH_, kSelection);
+            if (b > a) forRows(a, b, [&](int, int, int x0, int x1, int yy) { p.fillRect(x0, yy, x1 - x0, lineH_, kSelection); });
         }
 
-        int lead = 0;                                // indentation guides
+        int lead = 0;                                // indentation guides (first row of the line)
         while (lead < s.size() && s[lead] == QLatin1Char(' ')) ++lead;
         p.setPen(kGuide);
-        for (int c = tabWidth_; prefs().indentGuides && c < lead; c += tabWidth_) {
+        for (int c = tabWidth_; prefs().indentGuides && c < lead && c < (segs > 1 ? st[1] : INT_MAX); c += tabWidth_) {
             const int gx = left + c * charW_;
             p.drawLine(gx, y, gx, y + lineH_);
         }
@@ -721,10 +1172,12 @@ void CodeView::paintEvent(QPaintEvent*) {
         int pos = 0;
         auto drawRun = [&](int a, int len, int color) {
             if (len <= 0) return;
-            const QString t = s.mid(a, len);
-            if (t.trimmed().isEmpty()) return;
-            p.setPen(kTokenColors[color]);
-            p.drawText(left + a * charW_, y + ascent, t);
+            forRows(a, a + len, [&](int c0, int c1, int x0, int, int yy) {
+                const QString t = s.mid(c0, c1 - c0);
+                if (t.trimmed().isEmpty()) return;
+                p.setPen(kTokenColors[color]);
+                p.drawText(x0, yy + ascent, t);
+            });
         };
         for (size_t k = 0; k < spans.size(); ++k) {
             drawRun(pos, spans[k].start - pos, cText);
@@ -733,56 +1186,93 @@ void CodeView::paintEvent(QPaintEvent*) {
         }
         drawRun(pos, s.size() - pos, cText);
 
+        if (folds_.isFolded(l)) {                        // a folded header: a small "⋯" pill after the text
+            const int endCol = static_cast<int>(s.size());
+            const QRect pill(xAt(endCol) + charW_, yAt(endCol) + 2, charW_ * 3, lineH_ - 4);
+            p.setRenderHint(QPainter::Antialiasing, true);
+            p.setPen(Qt::NoPen);
+            p.setBrush(Theme::Keycap);
+            p.drawRoundedRect(pill, 4, 4);
+            p.setRenderHint(QPainter::Antialiasing, false);
+            p.setPen(Theme::Muted);
+            p.drawText(pill, Qt::AlignCenter, QStringLiteral("⋯"));
+        }
+
         for (const Squig& q : squigs) {                 // red = error, yellow = warning
             if (q.line != l) continue;
             const int a = displayCol(raw, q.col);
             int b = displayCol(raw, std::min(raw.size(), q.col + q.len));
             if (b <= a) b = a + 1;
-            const int x0 = left + a * charW_, x1 = left + b * charW_, base = y + lineH_ - 2;
             p.setPen(QPen(q.sev == 0 ? Theme::Error : Theme::Warning, 1));
-            QPolygon zig;
-            bool up = false;
-            for (int x = x0; x <= x1; x += 2) { zig << QPoint(x, up ? base - 2 : base); up = !up; }
-            if (zig.size() >= 2) p.drawPolyline(zig);
+            forRows(a, b, [&](int, int, int x0, int x1, int yy) {
+                const int base = yy + lineH_ - 2;
+                QPolygon zig;
+                bool up = false;
+                for (int x = x0; x <= std::max(x1, x0 + charW_); x += 2) { zig << QPoint(x, up ? base - 2 : base); up = !up; }
+                if (zig.size() >= 2) p.drawPolyline(zig);
+            });
         }
 
         if (haveBracket) {
             const Pos* pts[2] = {&b1, &b2};
             for (int k = 0; k < 2; ++k) {
                 if (pts[k]->line != l) continue;
-                const int bx = left + displayCol(raw, pts[k]->col) * charW_;
-                p.fillRect(bx, y, charW_, lineH_, QColor(0x88, 0x88, 0x88, 70));
+                const int dc = displayCol(raw, pts[k]->col);
+                const int bx = xAt(dc), by = yAt(dc);
+                p.fillRect(bx, by, charW_, lineH_, QColor(0x88, 0x88, 0x88, 70));
                 p.setPen(Theme::Muted);
-                p.drawRect(bx, y, charW_ - 1, lineH_ - 1);
+                p.drawRect(bx, by, charW_ - 1, lineH_ - 1);
             }
         }
 
         if (hasFocus() && cursorOn_ && l == cur_.line) {
-            const int cx = left + displayCol(raw, cur_.col) * charW_;
+            const int dc = displayCol(raw, cur_.col);
+            const int cx = xAt(dc), cy = yAt(dc);
             switch (prefs().cursorStyle) {
-                case 1: { QColor c = kCursorCol; c.setAlpha(150); p.fillRect(cx, y, charW_, lineH_, c); break; }   // block: the character shows through
-                case 2: p.fillRect(cx, y + lineH_ - 3, charW_, 2, kCursorCol); break;                                // underline
-                default: p.fillRect(cx, y, 2, lineH_, kCursorCol); break;                                            // line
+                case 1: { QColor c = kCursorCol; c.setAlpha(150); p.fillRect(cx, cy, charW_, lineH_, c); break; }   // block: the character shows through
+                case 2: p.fillRect(cx, cy + lineH_ - 3, charW_, 2, kCursorCol); break;                               // underline
+                default: p.fillRect(cx, cy, 2, lineH_, kCursorCol); break;                                           // line
             }
         }
+
+        y += segs * lineH_;
+        const size_t next = folds_.nextVisible(l, n);
+        if (next <= l) break;
+        l = next;
     }
 
     // line-number gutter, drawn last so horizontal scrolling slides under it
     p.fillRect(0, 0, gutterW_, vh, kBg);
     // (no divider line: the gutter and the text share one surface, like modern editors)
-    for (size_t l = first; prefs().lineNumbers && l < last; ++l) {
-        const int y = static_cast<int>(l - first) * lineH_;
-        p.setPen(l == cur_.line ? kGutterCur : kGutterNum);
-        p.drawText(QRect(0, y, gutterW_ - 10, lineH_), Qt::AlignRight | Qt::AlignVCenter, QString::number(l + 1));
+    for (const auto& ly : shown) {
+        if (!prefs().lineNumbers) break;
+        p.setPen(ly.first == cur_.line ? kGutterCur : kGutterNum);
+        p.drawText(QRect(0, ly.second, gutterW_ - 18, lineH_), Qt::AlignRight | Qt::AlignVCenter, QString::number(ly.first + 1));
     }
+    // fold arrows: always on folded blocks, on open blocks while the mouse is over the gutter
+    p.setRenderHint(QPainter::Antialiasing, true);
+    for (const auto& ly : shown) {
+        const size_t fl = ly.first;
+        const bool folded = folds_.isFolded(fl);
+        if (!folded && !(gutterHover_ && canFold(fl))) continue;
+        const qreal cx = foldMarkerLeft() + 7.5, cy = ly.second + lineH_ / 2.0;
+        p.setPen(QPen(folded ? kGutterCur : kGutterNum, 1.4, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+        QPolygonF arrow;
+        if (folded) arrow << QPointF(cx - 1.5, cy - 4) << QPointF(cx + 2.5, cy) << QPointF(cx - 1.5, cy + 4);   // >
+        else arrow << QPointF(cx - 4, cy - 1.5) << QPointF(cx, cy + 2.5) << QPointF(cx + 4, cy - 1.5);           // v
+        p.drawPolyline(arrow);
+    }
+    p.setRenderHint(QPainter::Antialiasing, false);
     if (!squigs.empty()) {                              // a dot in the gutter on every line with a problem
         p.setRenderHint(QPainter::Antialiasing, true);
         p.setPen(Qt::NoPen);
         for (int sev = 1; sev >= 0; --sev) {            // warnings first, so an error on the same line wins
             p.setBrush(sev == 0 ? Theme::Error : Theme::Warning);
-            for (const Squig& q : squigs)
-                if (q.sev == sev && q.line >= first && q.line < last)
-                    p.drawEllipse(QRectF(3, static_cast<int>(q.line - first) * lineH_ + (lineH_ - 7) / 2.0, 7, 7));
+            for (const Squig& q : squigs) {
+                if (q.sev != sev) continue;
+                for (const auto& ly : shown)
+                    if (ly.first == q.line) p.drawEllipse(QRectF(3, ly.second + (lineH_ - 7) / 2.0, 7, 7));
+            }
         }
         p.setRenderHint(QPainter::Antialiasing, false);
     }
@@ -932,6 +1422,7 @@ void CodeView::undo() {
     cur_ = anchor_ = clamp(where);
     blockValid_ = 0;
     compilerDiags_.clear();                 // the edit position is unknown: the next check redraws the marks
+    shiftFolds(cur_.line);                  // near enough; the next bracket report puts the folds right
     edited(0);
 }
 
@@ -943,6 +1434,7 @@ void CodeView::redo() {
     cur_ = anchor_ = clamp(where);
     blockValid_ = 0;
     compilerDiags_.clear();
+    shiftFolds(cur_.line);
     edited(0);
 }
 
@@ -1091,9 +1583,22 @@ void CodeView::newLineAbove() {
 
 // ---------------------------------------------------------------- cursor movement
 
+// The column Up / Down aim for, counted from the start of the cursor's row. Without wrap that is
+// the remembered column. With wrap it is taken from the cursor the first time and then kept.
+int CodeView::wantInRow() {
+    if (!wrapOn()) return wantCol_;
+    if (wantX_ < 0) {
+        std::vector<int> st;
+        lineSegments(cur_.line, st);
+        const int dc = displayColumn(cur_);
+        wantX_ = dc - st[static_cast<size_t>(segOf(st, dc))];
+    }
+    return wantX_;
+}
+
 void CodeView::afterMove(bool extend, bool keepWantCol) {
     if (!extend) anchor_ = cur_;
-    if (!keepWantCol) wantCol_ = displayColumn(cur_);
+    if (!keepWantCol) { wantCol_ = displayColumn(cur_); wantX_ = -1; }
     ed_.breakTyping();
     ensureCursorVisible();
     cursorOn_ = true;
@@ -1110,13 +1615,19 @@ void CodeView::moveCursor(QKeyEvent* e) {
     switch (e->key()) {
         case Qt::Key_Left:
             if (hasSelection() && !shift && !ctrl) { cur_ = selStart(); break; }
-            if (cur_.col == 0) { if (cur_.line > 0) cur_ = Pos{cur_.line - 1, d.lineLength(cur_.line - 1)}; }
+            if (cur_.col == 0) {
+                const size_t up = folds_.prevVisible(cur_.line);          // over a folded block, not into it
+                if (up < cur_.line) cur_ = Pos{up, d.lineLength(up)};
+            }
             else cur_.col = ctrl ? wordLeft(lineText(cur_.line), cur_.col) : prevCharCol(lineText(cur_.line), cur_.col);
             break;
         case Qt::Key_Right: {
             if (hasSelection() && !shift && !ctrl) { cur_ = selEnd(); break; }
             const std::string line = lineText(cur_.line);
-            if (cur_.col >= line.size()) { if (cur_.line + 1 < d.lineCount()) cur_ = Pos{cur_.line + 1, 0}; }
+            if (cur_.col >= line.size()) {
+                const size_t down = folds_.nextVisible(cur_.line, d.lineCount());
+                if (down > cur_.line) cur_ = Pos{down, 0};
+            }
             else cur_.col = ctrl ? wordRight(line, cur_.col) : nextCharCol(line, cur_.col);
             break;
         }
@@ -1124,10 +1635,11 @@ void CodeView::moveCursor(QKeyEvent* e) {
         case Qt::Key_Down: {
             const bool up = e->key() == Qt::Key_Up;
             keepWant = true;
-            if (up && cur_.line == 0) { cur_.col = 0; keepWant = false; break; }
-            if (!up && cur_.line + 1 >= d.lineCount()) { cur_.col = d.lineLength(cur_.line); keepWant = false; break; }
-            cur_.line += up ? static_cast<size_t>(-1) : 1;
-            cur_.col = byteColFor(lineText(cur_.line), wantCol_);
+            // by rows on screen: a folded block is one step, a wrapped line is several
+            const size_t row = cursorRow();
+            if (up && row == 0) { cur_.col = 0; keepWant = false; break; }
+            if (!up && row + 1 >= visibleRowCount()) { cur_.col = d.lineLength(cur_.line); keepWant = false; break; }
+            cur_ = posAtRow(up ? row - 1 : row + 1, wantInRow());
             break;
         }
         case Qt::Key_PageUp:
@@ -1135,9 +1647,9 @@ void CodeView::moveCursor(QKeyEvent* e) {
             const bool up = e->key() == Qt::Key_PageUp;
             const size_t step = static_cast<size_t>(std::max(1, visibleLines() - 1));
             keepWant = true;
-            if (up) cur_.line = cur_.line > step ? cur_.line - step : 0;
-            else cur_.line = std::min(cur_.line + step, d.lineCount() - 1);
-            cur_.col = byteColFor(lineText(cur_.line), wantCol_);
+            const size_t row = cursorRow();
+            const int want = wantInRow();
+            cur_ = posAtRow(up ? (row > step ? row - step : 0) : std::min(row + step, visibleRowCount() - 1), want);
             verticalScrollBar()->setValue(verticalScrollBar()->value() + (up ? -1 : 1) * static_cast<int>(step));
             break;
         }
@@ -1233,9 +1745,8 @@ void CodeView::inputMethodEvent(QInputMethodEvent* e) {
 
 QVariant CodeView::inputMethodQuery(Qt::InputMethodQuery q) const {
     if (q == Qt::ImCursorRectangle) {
-        const int x = textLeft() - horizontalScrollBar()->value() + displayColumn(cur_) * charW_;
-        const int y = static_cast<int>(cur_.line - std::min(cur_.line, firstVisible())) * lineH_;
-        return QRect(x, y, 1, lineH_);
+        const QPoint c = cursorPixel();
+        return QRect(c.x(), c.y(), 1, lineH_);
     }
     return QAbstractScrollArea::inputMethodQuery(q);
 }
@@ -1246,10 +1757,17 @@ void CodeView::mousePressEvent(QMouseEvent* e) {
     hidePopup();
     const bool triple = QDateTime::currentMSecsSinceEpoch() - lastDblClick_ < QApplication::doubleClickInterval();
     const Pos p = pointToPos(e->pos());
+    if (!triple && e->pos().x() >= foldMarkerLeft() && e->pos().x() < gutterW_ &&
+        (folds_.isFolded(p.line) || canFold(p.line))) {                  // the fold arrow
+        dragging_ = false;
+        toggleFold(p.line);
+        return;
+    }
     if (triple || e->pos().x() < gutterW_) {                              // triple click or click on a line number: whole line
         const Document& d = ed_.doc();
         anchor_ = Pos{p.line, 0};
-        cur_ = (p.line + 1 < d.lineCount()) ? Pos{p.line + 1, 0} : Pos{p.line, d.lineLength(p.line)};
+        const size_t next = folds_.nextVisible(p.line, d.lineCount());   // a folded header takes its block along
+        cur_ = (next > p.line) ? Pos{next, 0} : Pos{p.line, d.lineLength(p.line)};
         dragging_ = false;
         afterMove(true);
         return;
@@ -1260,6 +1778,12 @@ void CodeView::mousePressEvent(QMouseEvent* e) {
 }
 
 void CodeView::mouseMoveEvent(QMouseEvent* e) {
+    const bool overGutter = e->pos().x() < gutterW_;
+    if (overGutter != gutterHover_) {
+        gutterHover_ = overGutter;
+        viewport()->setCursor(overGutter ? Qt::ArrowCursor : Qt::IBeamCursor);
+        viewport()->update();
+    }
     if (!dragging_ || !(e->buttons() & Qt::LeftButton)) return;
     cur_ = pointToPos(e->pos());
     afterMove(true);
@@ -1359,10 +1883,11 @@ void CodeView::showCompletions(bool force) {
     int w = 120;
     for (int i = 0; i < rows; ++i) w = std::max(w, fontMetrics().horizontalAdvance(popup_->item(i)->text()) + 36);
     popup_->resize(w, rows * (lineH_ + 4) + 4);
-    const int x = textLeft() - horizontalScrollBar()->value() + (displayColumn(cur_) - static_cast<int>(prefix.size())) * charW_;
-    int y = static_cast<int>(cur_.line - std::min(cur_.line, firstVisible()) + 1) * lineH_;
+    const QPoint c = cursorPixel();                        // follows folds, word wrap and sideways scrolling
+    const int x = c.x() - static_cast<int>(prefix.size()) * charW_;
+    int y = c.y() + lineH_;
     if (y + popup_->height() > viewport()->height()) y = std::max(0, y - lineH_ - popup_->height());
-    popup_->move(std::max(gutterW_, x), y);
+    popup_->move(std::max(gutterW_, x), y + viewport()->y());   // the popup belongs to this widget; the text starts below the breadcrumbs
     popup_->show();
     popup_->raise();
 }

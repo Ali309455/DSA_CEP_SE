@@ -180,6 +180,10 @@ void SettingsDialog::buildUi() {
               &AppSettings::Values::matchBrackets, "parenthesis brace");
     addToggle("Status bar", "The bar at the bottom with cursor position, language and bracket status.", &AppSettings::Values::statusBar,
               "bottom bar footer");
+    addToggle("Word wrap", "Long lines continue on the next row instead of scrolling sideways (Alt+Z).", &AppSettings::Values::wordWrap,
+              "wrap long lines soft");
+    addToggle("Breadcrumbs", "The path bar above the text: folder, file, then the class and function the cursor is in.",
+              &AppSettings::Values::breadcrumbs, "path navigation symbols");
 
     // ---- Terminal ----
     beginSection("Terminal", "The panel under the editor (Ctrl+`).");

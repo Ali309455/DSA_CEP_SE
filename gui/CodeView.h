@@ -16,9 +16,12 @@
 #include "Diagnostics.h"
 #include "EditOps.h"
 #include "Editor.h"
+#include "Folding.h"
+#include "Outline.h"
 #include "Settings.h"
 
 class QListWidget;
+class Breadcrumbs;
 
 class CodeView : public QAbstractScrollArea {
     Q_OBJECT
@@ -69,6 +72,31 @@ public:
     // ---- snippets (engine hash table, shared by all tabs: SnippetStore) ----
     bool snippetAtCursor() const;                      // the word before the cursor is a snippet trigger
 
+    // ---- code folding (engine/Folding.h); ranges are up to date a moment after the last edit ----
+    const DynArray<FoldRange>& foldRanges() const { return foldRanges_; }
+    bool canFold(size_t line) const { return foldRangeAt(foldRanges_, line) != nullptr; }
+    bool isFolded(size_t line) const { return folds_.isFolded(line); }
+    bool isLineHidden(size_t line) const { return folds_.isHidden(line); }
+    size_t foldedCount() const { return folds_.count(); }
+    size_t visibleRowCount() const;                      // rows on screen: folds hide lines, word wrap adds rows
+    // On a header: fold or unfold it. Anywhere else: fold the innermost block around the line.
+    bool toggleFold(size_t line);
+
+    // ---- outline (engine/Outline.h): the file's symbols, refreshed with the bracket report ----
+    const DynArray<Symbol>& symbols() const { return symbols_; }
+    void refreshNow() { recomputeBrackets(); }           // brackets, fold ranges and outline at once (tests)
+
+    // ---- word wrap (Settings > Appearance, Alt+Z) ----
+    bool wrapOn() const;                                 // the setting, unless the file is huge
+    size_t rowOf(size_t line) const;                     // first row of a line (a hidden line: its block's header)
+    size_t cursorRow() const;                            // the row the cursor is drawn on
+
+    // ---- breadcrumbs: folder > file > class > function at the top of the editor ----
+    Breadcrumbs* breadcrumbs() const { return crumbs_; }
+    static void setBreadcrumbRoot(const QString& dir);  // the open folder: paths are shown relative to it
+    void refreshBreadcrumbs();
+    void openBreadcrumb(int index, const QPoint& globalBelow);   // what a click on crumb 'index' does
+
     int zoom() const { return zoom_; }
     void setZoom(int points);
 
@@ -93,11 +121,18 @@ public slots:
     void triggerAutocomplete();
     void expandSnippet();                // Edit > Expand Snippet (Tab does the same)
     void goToLine(int line1);            // 1-based, clamped
+    void foldAtCursor();                 // Ctrl+Shift+[
+    void unfoldAtCursor();               // Ctrl+Shift+]
+    void foldAll();
+    void unfoldAll();
+    void jumpToHistory(size_t undoSteps);   // Undo History panel: undo / redo to that point
 
 signals:
     void stateChanged();                 // cursor, selection, text, modified flag or report changed
     void textEdited();                   // the text changed
     void diagnosticsChanged();           // the list behind diagnostics() changed
+    void outlineChanged();               // symbols() was rebuilt
+    void revealInExplorer(const QString& path);   // a folder crumb was clicked
     void statusMessage(const QString&);  // something short for the status bar
 
 protected:
@@ -118,7 +153,7 @@ protected:
 
 private:
     struct Span { int start; int len; int color; };
-    enum Color { cText, cKeyword, cType, cString, cNumber, cComment, cPreproc, cCount };
+    enum Color { cText, cKeyword, cType, cString, cNumber, cComment, cPreproc, cFunction, cOperator, cConstant, cCount };
 
     Editor ed_;
     Autocomplete ac_;
@@ -147,6 +182,35 @@ private:
     size_t lastLineCount_ = 1;                // to move compiler marks when lines are added / removed
     unsigned revision_ = 0;
     QString snippetMsg_;
+    // folding and outline
+    FoldSet folds_;                           // what is folded; maps lines <-> rows
+    DynArray<FoldRange> foldRanges_;          // what can be folded (from the last bracket report)
+    DynArray<Symbol> symbols_;
+    size_t foldLineCount_ = 1;                // line count the folds were last adjusted to
+    bool gutterHover_ = false;                // show the fold arrows of open blocks while the mouse is on the gutter
+    void shiftFolds(size_t fromLine);
+    void foldsChanged();
+    void moveCursorOutOfFolds();
+    size_t lineAtRow(size_t row) const;
+    int foldMarkerLeft() const { return gutterW_ - 16; }
+
+    // word wrap: rowStart_[l] = first row of line l, rowStart_[lineCount] = all rows (prefix sums)
+    mutable DynArray<size_t> rowStart_;
+    mutable bool rowsDirty_ = true;
+    mutable int rowsCols_ = 0;
+    int wantX_ = -1;                          // Up / Down with wrap: columns into the row the cursor keeps (-1 = take it)
+    int wrapCols() const;
+    void wrapStarts(const QString& expanded, std::vector<int>& starts) const;
+    void lineSegments(size_t line, std::vector<int>& starts) const;
+    static int segOf(const std::vector<int>& starts, int dcol);
+    void ensureRows() const;
+    void invalidateRows() { rowsDirty_ = true; }
+    QPoint cursorPixel() const;               // top-left of the cursor in the viewport
+    Pos posAtRow(size_t row, int x) const;
+    int wantInRow();
+    void cellAt(const QPoint& pt, int shift, size_t& line, int& dcol) const;
+
+    Breadcrumbs* crumbs_ = nullptr;
 
     // the user's preferences (Settings window): font, tabs, cursor, what is drawn
     void applySettings();
@@ -156,6 +220,7 @@ private:
     void applyFont();
     void updateGutter();
     int textLeft() const { return gutterW_ + 8; }
+    // the first visible ROW (rows skip folded lines; without folds row == line)
     size_t firstVisible() const { return static_cast<size_t>(verticalScrollBar()->value()); }
     int visibleLines() const;
     void updateScrollBars();

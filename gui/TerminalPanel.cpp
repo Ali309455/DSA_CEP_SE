@@ -17,6 +17,9 @@
 #include <QTimer>
 #include <QToolButton>
 #include <QVBoxLayout>
+#include <QMouseEvent>
+#include <QTextBlock>
+#include "Diagnostics.h"
 #include "Icons.h"
 #include "Settings.h"
 #include "Theme.h"
@@ -141,23 +144,18 @@ TerminalPanel::TerminalPanel(QWidget* parent) : QWidget(parent) {
     // header
     QWidget* head = new QWidget(this);
     head->setObjectName("terminalHeader");
-    head->setFixedHeight(34);
+    head->setFixedHeight(32);
     QHBoxLayout* h = new QHBoxLayout(head);
-    h->setContentsMargins(14, 0, 8, 0);
+    h->setContentsMargins(12, 0, 6, 0);
     h->setSpacing(8);
-    QLabel* ico = new QLabel(head);
-    ico->setPixmap(Icons::get(Icons::Terminal).pixmap(QSize(16, 16)));
-    QLabel* title = new QLabel("TERMINAL", head);
-    title->setObjectName("terminalTitle");
+    // (no "TERMINAL" title: the tab above already says Terminal)
     chip_ = new QLabel(head);
     chip_->setObjectName("terminalChip");
     chip_->setFixedHeight(20);
     cwdLabel_ = new QLabel(head);
     cwdLabel_->setObjectName("terminalCwd");
     cwdLabel_->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
-    h->addWidget(ico);
-    h->addWidget(title);
-    h->addWidget(chip_);
+    h->addWidget(chip_, 0, Qt::AlignVCenter);
     h->addSpacing(4);
     h->addWidget(cwdLabel_, 1);
     auto button = [head](Icons::Glyph g, const QString& tip) {
@@ -187,6 +185,8 @@ TerminalPanel::TerminalPanel(QWidget* parent) : QWidget(parent) {
     out_->setUndoRedoEnabled(false);
     out_->setFocusPolicy(Qt::ClickFocus);
     out_->setTextInteractionFlags(Qt::TextSelectableByMouse | Qt::TextSelectableByKeyboard);
+    out_->viewport()->setMouseTracking(true);          // hover underlines "file.cpp:12" references
+    out_->viewport()->installEventFilter(this);
     v->addWidget(out_, 1);
 
     // prompt row
@@ -280,7 +280,79 @@ void TerminalPanel::historyStep(int dir) {
     input_->setText(historyPos_ == history_.size() ? draft_ : history_[historyPos_]);
 }
 
+// ---------------------------------------------------------------- clickable file references
+
+bool TerminalPanel::refInBlock(int block, int column, QString* path, int* line, int* col, int* from, int* to) const {
+    const QTextBlock b = out_->document()->findBlockByNumber(block);
+    if (!b.isValid()) return false;
+    const QString text = b.text();
+    if (column < 0 || column >= text.size()) return false;
+    const QByteArray bytes = text.toUtf8();
+    FileRef r;                                             // the engine works on UTF-8 bytes: convert the column there and back
+    if (!fileRefAt(bytes.toStdString(), static_cast<size_t>(text.left(column).toUtf8().size()), r)) return false;
+    QString p = QString::fromStdString(r.path);
+    if (!QFileInfo(p).isAbsolute()) p = QDir(cwd_).filePath(p);
+    if (path) *path = QDir::cleanPath(p);
+    if (line) *line = static_cast<int>(r.line);
+    if (col) *col = static_cast<int>(r.col);
+    if (from) *from = b.position() + static_cast<int>(QString::fromUtf8(bytes.left(static_cast<int>(r.start))).size());
+    if (to) *to = b.position() + static_cast<int>(QString::fromUtf8(bytes.left(static_cast<int>(r.end))).size());
+    return true;
+}
+
+bool TerminalPanel::linkAt(const QPoint& pos, QString* path, int* line, int* col, int* from, int* to) const {
+    const QTextCursor c = out_->cursorForPosition(pos);
+    // cursorForPosition gives the nearest gap between characters: also try the character left of it
+    if (refInBlock(c.blockNumber(), c.positionInBlock(), path, line, col, from, to)) return true;
+    return c.positionInBlock() > 0 && refInBlock(c.blockNumber(), c.positionInBlock() - 1, path, line, col, from, to) &&
+           out_->cursorRect(c).left() >= pos.x() - out_->fontMetrics().horizontalAdvance(QLatin1Char('M'));
+}
+
+bool TerminalPanel::openLinkAt(int block, int column) {
+    QString path;
+    int line = 0, col = 0;
+    if (!refInBlock(block, column, &path, &line, &col, nullptr, nullptr)) return false;
+    emit openLocationRequested(path, line, col);
+    return true;
+}
+
+void TerminalPanel::setHoverLink(int from, int to) {
+    if (from == hoverFrom_) return;
+    hoverFrom_ = from;
+    QList<QTextEdit::ExtraSelection> sel;
+    if (from >= 0) {
+        QTextEdit::ExtraSelection s;
+        s.cursor = QTextCursor(out_->document());
+        s.cursor.setPosition(from);
+        s.cursor.setPosition(to, QTextCursor::KeepAnchor);
+        s.format.setFontUnderline(true);
+        s.format.setForeground(Theme::Accent);
+        sel << s;
+    }
+    out_->setExtraSelections(sel);
+    out_->viewport()->setCursor(from >= 0 ? Qt::PointingHandCursor : Qt::IBeamCursor);
+    out_->viewport()->setToolTip(from >= 0 ? QStringLiteral("Click to open") : QString());
+}
+
 bool TerminalPanel::eventFilter(QObject* o, QEvent* e) {
+    if (o == out_->viewport()) {
+        if (e->type() == QEvent::MouseMove) {
+            const QMouseEvent* m = static_cast<QMouseEvent*>(e);
+            int from = -1, to = -1;
+            if (!(m->buttons() & Qt::LeftButton) && linkAt(m->pos(), nullptr, nullptr, nullptr, &from, &to)) setHoverLink(from, to);
+            else setHoverLink(-1, -1);
+        } else if (e->type() == QEvent::Leave) {
+            setHoverLink(-1, -1);
+        } else if (e->type() == QEvent::MouseButtonRelease) {
+            const QMouseEvent* m = static_cast<QMouseEvent*>(e);
+            QString path;
+            int line = 0, col = 0;
+            // a plain click opens it; a drag that selected text stays a selection
+            if (m->button() == Qt::LeftButton && !out_->textCursor().hasSelection() && linkAt(m->pos(), &path, &line, &col))
+                emit openLocationRequested(path, line, col);
+        }
+        return false;
+    }
     if (o == input_ && e->type() == QEvent::KeyPress) {
         QKeyEvent* k = static_cast<QKeyEvent*>(e);
         const bool ctrl = k->modifiers() & Qt::ControlModifier;
@@ -339,6 +411,7 @@ void TerminalPanel::echoCommand(const QString& line) {
 }
 
 void TerminalPanel::clearScreen() {
+    setHoverLink(-1, -1);
     out_->clear();
     needNewline_ = false;
 }

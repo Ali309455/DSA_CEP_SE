@@ -11,6 +11,7 @@
 #include <QColor>
 #include <QIcon>
 #include <QString>
+#include "Outline.h"
 
 namespace Icons {
 
@@ -35,6 +36,9 @@ QIcon forFile(const QString& fileName);
 
 // Filled folder icon.
 QIcon folder(bool open);
+
+// Badge for an Outline symbol: N namespace, C class, S struct, U union, E enum, f function (engine SymbolKind).
+QIcon forSymbol(SymbolKind kind);
 
 // The DevPad application icon (rounded gradient square with braces).
 QIcon app();

@@ -1,8 +1,9 @@
 // Theme.h - DevPad's look: one palette for every widget, the style sheet and the fonts.
 //
-// Twelve built-in themes, each with its own syntax colours, as six light / dark pairs:
+// Fourteen built-in themes, each with its own syntax colours, as seven light / dark pairs:
 //   Midnight (the default) <-> Daylight      Nord <-> Solarized Light     Dracula <-> Alucard
 //   Monokai <-> Paper                        Gruvbox Dark <-> Gruvbox Light     Tokyo Night <-> One Light
+//   Jellyfish <-> Jellyfish Light
 // The colours below are plain variables that setScheme() overwrites, so every widget that reads
 // them (CodeView paints with them, the style sheet is built from them) follows a theme change.
 // The accent colour is separate (Settings > Appearance > Accent colour) and works with every theme.
@@ -50,10 +51,12 @@ inline QColor Caret(0x6b, 0x9f, 0xff);
 inline QColor IndentGuide(0x33, 0x33, 0x33);
 
 // syntax colours, in the order of the tokenizer's classes:
-// text, keyword, type, string, number, comment, preprocessor
-inline QColor Syntax[] = {
+// text, keyword, type, string, number, comment, preprocessor, function, operator, constant
+const int kSyntaxCount = 10;
+inline QColor Syntax[kSyntaxCount] = {
     QColor(0xd4, 0xd4, 0xd4), QColor(0xc6, 0x78, 0xdd), QColor(0xe5, 0xc0, 0x7b), QColor(0x98, 0xc3, 0x79),
-    QColor(0xd1, 0x9a, 0x66), QColor(0x7f, 0x84, 0x8e), QColor(0x56, 0xb6, 0xc2)};
+    QColor(0xd1, 0x9a, 0x66), QColor(0x7f, 0x84, 0x8e), QColor(0x56, 0xb6, 0xc2), QColor(0x61, 0xaf, 0xef),
+    QColor(0x89, 0xdd, 0xff), QColor(0xe0, 0x6c, 0x75)};
 
 // status colours (errors, warnings, success) and line-icon colours
 inline QColor Error(0xf1, 0x4c, 0x4c);

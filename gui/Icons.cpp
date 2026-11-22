@@ -393,6 +393,37 @@ QIcon forFile(const QString& fileName) {
     return icon;
 }
 
+QIcon forSymbol(SymbolKind k) {
+    QChar letter = 'f';
+    QColor c = Theme::Syntax[1];
+    switch (k) {
+        case SymbolKind::Namespace: letter = 'N'; c = Theme::Syntax[6]; break;
+        case SymbolKind::Class: letter = 'C'; c = Theme::Syntax[2]; break;
+        case SymbolKind::Struct: letter = 'S'; c = Theme::Syntax[2]; break;
+        case SymbolKind::Union: letter = 'U'; c = Theme::Syntax[2]; break;
+        case SymbolKind::Enum: letter = 'E'; c = Theme::Syntax[4]; break;
+        case SymbolKind::Function: letter = 'f'; c = Theme::Syntax[1]; break;
+    }
+    const qreal dpr = 2.0;
+    QPixmap pm(QSize(16, 16) * dpr);
+    pm.setDevicePixelRatio(dpr);
+    pm.fill(Qt::transparent);
+    QPainter p(&pm);
+    p.setRenderHint(QPainter::Antialiasing, true);
+    QColor bg = c;
+    bg.setAlpha(46);
+    p.setPen(QPen(c, 1));
+    p.setBrush(bg);
+    p.drawRoundedRect(QRectF(1.5, 1.5, 13, 13), 3.5, 3.5);
+    QFont f = p.font();
+    f.setPixelSize(10);
+    f.setBold(true);
+    p.setFont(f);
+    p.setPen(c);
+    p.drawText(QRectF(0, 0, 16, 16), Qt::AlignCenter, QString(letter));
+    return QIcon(pm);
+}
+
 QIcon folder(bool open) {
     static QIcon cache[2];
     QIcon& icon = cache[open ? 1 : 0];

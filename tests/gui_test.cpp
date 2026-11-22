@@ -37,6 +37,9 @@
 #include "ShortcutsDialog.h"
 #include "TerminalPanel.h"
 #include "ProblemsPanel.h"
+#include "SidePanels.h"
+#include "Breadcrumbs.h"
+#include <QTextBlock>
 #include "SnippetDialog.h"
 #include "SnippetStore.h"
 #include "SyntaxChecker.h"
@@ -754,7 +757,7 @@ static void testThemes() {
     S.resetToDefaults();
     MainWindow w;
     w.show();
-    CHECK(Theme::schemeCount() == 12 && Theme::currentScheme() == "midnight" && Theme::isDark());
+    CHECK(Theme::schemeCount() == 14 && Theme::currentScheme() == "midnight" && Theme::isDark());
     CHECK(Theme::Editor == QColor(0x1f, 0x1f, 0x1f));
 
     // a theme change is a settings change: colours, style sheet and the stored value all follow
@@ -965,6 +968,253 @@ static void testShortcutsWindow() {
     d->setFilter("");
     CHECK(d->visibleEntryCount() == list.size());
     d->close();
+}
+
+static void testCommandPalette() {
+    std::cout << "[command palette]\n";
+    QSettings().remove("recentCommands");
+    MainWindow w;
+    const QList<MainWindow::PaletteCommand> all = w.paletteCommands();
+    CHECK(all.size() > 40);
+    bool hasNested = false, hasTheme = false, hasPalette = false, hasCheckable = false;
+    for (const auto& c : all) {
+        hasNested = hasNested || c.path == "Edit/Lines/Move Line Up";
+        hasTheme = hasTheme || c.path == "View/Theme/Nord (dark)";
+        hasPalette = hasPalette || (c.path == "Search/Command Palette…" && c.keys.contains("P"));
+        hasCheckable = hasCheckable || c.path == "Run/Check Code While Typing";
+        CHECK(c.action && !c.path.contains('&'));
+    }
+    CHECK(hasNested && hasTheme && hasPalette && hasCheckable);
+
+    // fuzzy ranking from the engine: initials and parts of words find the command
+    QList<MainWindow::PaletteCommand> hits = w.rankCommands("toggle terminal");
+    CHECK(!hits.isEmpty() && hits[0].path == "View/Toggle Terminal");
+    hits = w.rankCommands("nord");
+    CHECK(!hits.isEmpty() && hits[0].path == "View/Theme/Nord (dark)");
+    hits = w.rankCommands("mlu");
+    CHECK(!hits.isEmpty() && hits[0].path == "Edit/Lines/Move Line Up");
+    CHECK(w.rankCommands("zzzzqq").isEmpty());
+    CHECK(w.rankCommands("").size() == std::min(60, int(all.size())));
+
+    // running one triggers the action and puts it first when the search is empty
+    const QString before = Theme::currentScheme();
+    CHECK(w.runCommand("View/Theme/Nord (dark)"));
+    CHECK(Theme::currentScheme() == "nord");
+    CHECK(w.runCommand("Edit/Select All"));
+    CHECK(!w.runCommand("Nope/Not a command"));
+    CHECK(w.recentCommands() == (QStringList{"Edit/Select All", "View/Theme/Nord (dark)"}));
+    hits = w.rankCommands("");
+    CHECK(hits.size() >= 2 && hits[0].path == "Edit/Select All" && hits[1].path == "View/Theme/Nord (dark)");
+    w.setTheme(before);
+    QSettings().remove("recentCommands");
+}
+
+static void testFolding() {
+    std::cout << "[code folding]\n";
+    CodeView v;
+    v.resize(600, 400);
+    v.show();
+    //            0           1      2      3      4    5            6             7        8        9      10   11
+    setText(&v, "int f() {\n  a;\n  b;\n  c;\n}\nint g() {\n  if (x) {\n    y;\n    z;\n  }\n}\nend");
+    v.refreshNow();
+    CHECK(v.foldRanges().size() == 3 && v.canFold(0) && v.canFold(5) && v.canFold(6) && !v.canFold(1) && !v.canFold(4));
+    CHECK(v.toggleFold(0) && v.isFolded(0) && v.isLineHidden(2) && !v.isLineHidden(4) && v.visibleRowCount() == 9);
+    v.setCursor(Pos{0, 3});
+    key(&v, Qt::Key_Down);                                   // over the folded block, onto its closing brace
+    CHECK(v.cursor().line == 4);
+    key(&v, Qt::Key_Up);
+    CHECK(v.cursor().line == 0);
+    key(&v, Qt::Key_End);
+    key(&v, Qt::Key_Right);                                  // Right at the end of a folded header jumps the block too
+    CHECK(v.cursor().line == 4 && v.isFolded(0));
+    v.setCursor(Pos{2, 0});                                  // going into a folded block opens it
+    CHECK(!v.isFolded(0) && v.cursor().line == 2 && v.visibleRowCount() == 12);
+
+    v.setCursor(Pos{7, 2});
+    v.foldAtCursor();                                        // the innermost block: the if
+    CHECK(v.isFolded(6) && !v.isFolded(5) && v.cursor().line == 6);   // the cursor moved out to the header
+    v.foldAtCursor();                                        // again: the block around it
+    CHECK(v.isFolded(5) && v.isFolded(6) && v.cursor().line == 5);
+    v.unfoldAtCursor();
+    CHECK(!v.isFolded(5) && v.isFolded(6));
+    v.unfoldAll();
+    CHECK(v.foldedCount() == 0);
+    v.foldAll();
+    CHECK(v.foldedCount() == 3 && v.visibleRowCount() == 5);       // lines 0, 4, 5, 10, 11
+    v.repaint();                                             // painting with folds (header pills, arrows)
+    v.unfoldAll();
+
+    // folds move with the text, and Undo brings them back
+    CHECK(v.toggleFold(5));
+    v.setCursor(Pos{0, 0});
+    key(&v, Qt::Key_Return);
+    CHECK(v.isFolded(6) && !v.isFolded(5));
+    v.refreshNow();
+    CHECK(v.isFolded(6));
+    v.undo();
+    v.refreshNow();
+    CHECK(v.isFolded(5) && v.editor().doc().lineCount() == 12);
+    v.goToLine(9);                                           // Go to Line into a fold opens it
+    CHECK(!v.isFolded(5) && v.cursor().line == 8);
+
+    // scripts fold by indentation
+    CodeView py;
+    py.setLanguageForPath("x.py");
+    setText(&py, "def f():\n    a = 1\n    return a\nprint(f())");
+    py.refreshNow();
+    CHECK(py.canFold(0) && py.toggleFold(0) && py.visibleRowCount() == 2);
+}
+
+static void testOutlineAndHistoryPanels() {
+    std::cout << "[outline and undo history panels]\n";
+    QTemporaryDir tmp;
+    const QString file = QDir(tmp.path()).filePath("shapes.cpp");
+    {
+        QFile f(file);
+        (void)f.open(QIODevice::WriteOnly);
+        f.write("struct Shape {\n"            // 0
+                "    int w = 2;\n"           // 1
+                "    int area() const {\n"   // 2
+                "        return w * w;\n"    // 3
+                "    }\n"                    // 4
+                "};\n"                       // 5
+                "int main() {\n"             // 6
+                "    Shape s;\n"             // 7
+                "    return s.area();\n"     // 8
+                "}\n");                      // 9
+    }
+    MainWindow w;
+    w.resize(1100, 700);
+    w.show();
+    CHECK(!w.outlineVisible() && !w.historyVisible());
+    CHECK(w.openPath(file));
+    CodeView* v = w.currentView();
+    v->refreshNow();
+    OutlinePanel* o = w.outline();
+    CHECK(o->symbolCount() == 3);
+    w.showOutline(true);
+    CHECK(w.outlineVisible());
+    o->setFilter("area");
+    CHECK(o->visibleCount() == 2);                           // the match and its parent struct
+    o->setFilter("zzz");
+    CHECK(o->visibleCount() == 0);
+    o->setFilter("");
+    CHECK(o->visibleCount() == 3);
+    CHECK(o->activate(2) && v->cursor().line == 6 && v->cursor().col == 4);
+    v->setCursor(Pos{3, 2});
+    CHECK(o->currentSymbol() == 1);                          // the outline follows the cursor: inside area()
+    for (QAction* a : w.findChildren<QAction*>())
+        if (a->text() == "Toggle Outline") a->trigger();
+    CHECK(!w.outlineVisible());
+
+    HistoryPanel* h = w.history();
+    w.showHistory(true);
+    CHECK(w.historyVisible() && h->entryCount() == 0);       // nothing changed yet
+    const QString original = txt(v);
+    v->setCursor(Pos{9, 1});
+    key(v, Qt::Key_Return);
+    type(v, "int one;");
+    key(v, Qt::Key_Return);
+    type(v, "int two;");
+    const int u = static_cast<int>(v->editor().undoCount());
+    CHECK(u >= 2 && h->entryCount() == u + 1 && h->currentRow() == u);
+    CHECK(h->jumpTo(1) && v->editor().undoCount() == 1 && static_cast<int>(v->editor().redoCount()) == u - 1);
+    CHECK(h->entryCount() == u + 1 && h->currentRow() == 1 && !txt(v).contains("one"));
+    CHECK(h->jumpTo(u) && txt(v).contains("int two;") && v->editor().redoCount() == 0);
+    CHECK(h->jumpTo(0) && txt(v) == original);
+    CHECK(!h->jumpTo(99));
+    h->jumpTo(u);
+
+    w.newTab();                                              // the panels follow the current tab
+    CHECK(o->symbolCount() == 0 && h->entryCount() == 0);
+    w.closeTab(w.tabCount() - 1, true);
+    CHECK(o->symbolCount() == 3 && h->entryCount() == u + 1);
+    w.closeTab(0, true);
+    CHECK(o->symbolCount() == 0 && h->entryCount() == 0);
+}
+
+static void testWordWrap() {
+    std::cout << "[word wrap]\n";
+    AppSettings::Values s = AppSettings::instance().values();
+    s.wordWrap = true;
+    AppSettings::instance().apply(s);
+    CodeView v;
+    v.resize(420, 300);
+    v.show();
+    QString longLine;
+    for (int i = 0; i < 40; ++i) longLine += QString("word%1 ").arg(i);
+    setText(&v, longLine + "\nshort");
+    CHECK(v.wrapOn());
+    const size_t rows0 = v.rowOf(1);                     // rows taken by the long line
+    CHECK(rows0 >= 3 && v.visibleRowCount() == rows0 + 1);
+    v.setCursor(Pos{0, 0});
+    key(&v, Qt::Key_Down);                               // down one row, still inside the long line
+    CHECK(v.cursor().line == 0 && v.cursor().col > 0 && v.cursorRow() == 1);
+    key(&v, Qt::Key_Up);
+    CHECK(v.cursor().line == 0 && v.cursor().col == 0);
+    v.setCursor(Pos{1, 2});
+    CHECK(v.cursorRow() == rows0);
+    v.repaint();
+    v.resize(800, 300);                                  // wider: fewer rows
+    QApplication::processEvents();
+    CHECK(v.rowOf(1) < rows0);
+    s.wordWrap = false;
+    AppSettings::instance().apply(s);
+    CHECK(!v.wrapOn() && v.visibleRowCount() == 2 && v.rowOf(1) == 1);
+    AppSettings::instance().resetToDefaults();
+}
+
+static void testBreadcrumbsAndTerminalLinks() {
+    std::cout << "[breadcrumbs and clickable terminal links]\n";
+    AppSettings::instance().resetToDefaults();
+    QTemporaryDir tmp;
+    const QString root = QFileInfo(tmp.path()).canonicalFilePath();
+    QDir(root).mkpath("src");
+    const QString file = QDir(root).filePath("src/shapes.cpp");
+    {
+        QFile f(file);
+        (void)f.open(QIODevice::WriteOnly);
+        f.write("struct Shape {\n    int area() const {\n        int w = 2;\n        return w * w;\n    }\n};\n");
+    }
+    MainWindow w;
+    w.resize(1000, 700);
+    w.show();
+    w.setWorkspaceRoot(root);
+    CHECK(w.openPath(file));
+    CodeView* v = w.currentView();
+    v->refreshNow();
+    v->setCursor(Pos{3, 4});
+    const QString sep = QString(" › ");
+    CHECK_EQ(v->breadcrumbs()->text(), "src" + sep + "shapes.cpp" + sep + "Shape" + sep + "area()");
+    CHECK(v->breadcrumbs()->isVisible());
+    v->setCursor(Pos{5, 0});
+    CHECK_EQ(v->breadcrumbs()->text(), "src" + sep + "shapes.cpp" + sep + "Shape");
+    v->openBreadcrumb(3, QPoint());                      // out of range: nothing happens
+    v->openBreadcrumb(2, QPoint());                      // the "Shape" crumb: jump to the struct
+    CHECK(v->cursor().line == 0);
+    QSignalSpy reveal(v, &CodeView::revealInExplorer);
+    v->openBreadcrumb(0, QPoint());                      // a folder crumb shows it in the Explorer
+    CHECK(reveal.count() == 1 && reveal.at(0).at(0).toString() == QDir(root).filePath("src"));
+    AppSettings::Values s = AppSettings::instance().values();
+    s.breadcrumbs = false;
+    AppSettings::instance().apply(s);
+    CHECK(!v->breadcrumbs()->isVisible());
+    AppSettings::instance().resetToDefaults();
+
+    // a compiler error in the terminal opens the file at its line and column
+    TerminalPanel* t = w.terminal();
+    t->setWorkingDirectory(root);
+    TerminalPanel::appendAnsi(t->output(), "src/shapes.cpp:4:9: error: something\n");
+    int block = -1;
+    for (QTextBlock b = t->output()->document()->begin(); b.isValid(); b = b.next())
+        if (b.text().startsWith("src/shapes.cpp")) block = b.blockNumber();
+    CHECK(block >= 0);
+    QSignalSpy open(t, &TerminalPanel::openLocationRequested);
+    CHECK(!t->openLinkAt(block, 30));                    // past the reference: nothing
+    CHECK(t->openLinkAt(block, 3) && open.count() == 1);
+    CHECK(open.at(0).at(0).toString() == QDir::cleanPath(file) && open.at(0).at(1).toInt() == 4 && open.at(0).at(2).toInt() == 9);
+    CHECK(w.currentView()->cursor().line == 3 && w.currentView()->cursor().col == 8);
+    CHECK(!w.openLocation(QDir(root).filePath("nope.cpp"), 1, 1));
 }
 
 static void testTerminal() {
@@ -1415,6 +1665,11 @@ int main(int argc, char** argv) {
     testSnippetSuggestions();
     testAutoSave();
     testShortcutsWindow();
+    testCommandPalette();
+    testFolding();
+    testOutlineAndHistoryPanels();
+    testWordWrap();
+    testBreadcrumbsAndTerminalLinks();
     testTerminal();
     testPanelsInMainWindow();
     testRun();

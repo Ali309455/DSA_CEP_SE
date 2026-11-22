@@ -287,6 +287,39 @@ bool Editor::redo(std::string* label, Pos* where) {
     return true;
 }
 
+size_t Editor::jumpToHistory(size_t undoSteps, Pos* where) {
+    size_t moved = 0;
+    Pos w;
+    while (um_.undoCount() > undoSteps && undo(nullptr, &w)) ++moved;
+    while (um_.undoCount() < undoSteps && redo(nullptr, &w)) ++moved;
+    if (moved && where) *where = w;
+    return moved;
+}
+
+std::string Editor::describeStep(const Group& g) {
+    std::string out = g.label.empty() ? std::string("edit") : g.label;
+    if (g.cmds.empty()) return out;
+    // the text of a single insert / delete, shortened and on one line
+    const Command& c = g.cmds[g.cmds.size() - 1];
+    if (g.cmds.size() <= 2) {
+        std::string t;
+        for (size_t i = 0; i < c.text.size() && t.size() < 28; ++i) {
+            const char ch = c.text[i];
+            if (ch == '\n') t += "\xE2\x86\xB5";                 // the "return" arrow
+            else if (ch == '\t') t += ' ';
+            else t += ch;
+        }
+        if (c.text.size() > 28) t += "...";
+        bool blank = true;
+        for (char ch : t) if (ch != ' ') { blank = false; break; }
+        if (!t.empty() && !blank) out += " \"" + t + "\"";
+    } else {
+        out += " (" + std::to_string(g.cmds.size()) + " changes)";
+    }
+    out += "  line " + std::to_string(g.cmds[0].start.line + 1);
+    return out;
+}
+
 // ---------------------------------------------------------------- files
 
 void Editor::newDocument() {

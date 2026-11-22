@@ -182,6 +182,103 @@ size_t countSeverity(const DynArray<Diagnostic>& list, Severity s) {
     return n;
 }
 
+// ---------------------------------------------------------------- file references in output
+
+static bool refPathChar(char c) {
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '-' || c == '.' ||
+           c == '/' || c == '\\' || c == '~' || c == '+';
+}
+static bool refDigit(char c) { return c >= '0' && c <= '9'; }
+static bool refLetter(char c) { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'); }
+
+// A file name with an extension of 1..10 letters / digits (at least one letter), e.g. "a.cpp", "dir/x.h".
+static bool looksLikeFile(const std::string& p) {
+    if (p.empty() || p.compare(0, 2, "//") == 0) return false;               // "//host" is part of a URL
+    const size_t slash = p.find_last_of("/\\");
+    const size_t nameAt = slash == std::string::npos ? 0 : slash + 1;
+    const size_t dot = p.rfind('.');
+    if (dot == std::string::npos || dot < nameAt || dot == nameAt || dot + 1 >= p.size() || p.size() - dot - 1 > 10) return false;
+    bool letter = false;
+    for (size_t i = dot + 1; i < p.size(); ++i) {
+        if (!refLetter(p[i]) && !refDigit(p[i]) && p[i] != '+') return false;
+        letter = letter || refLetter(p[i]);
+    }
+    return letter;
+}
+
+// Reads digits at 'i'; returns the number (0 if none) and moves 'i' past them.
+static size_t readNumber(const std::string& t, size_t& i) {
+    size_t v = 0;
+    const size_t start = i;
+    while (i < t.size() && refDigit(t[i]) && i - start < 9) v = v * 10 + static_cast<size_t>(t[i++] - '0');
+    return v;
+}
+
+DynArray<FileRef> findFileRefs(const std::string& t) {
+    DynArray<FileRef> out;
+    const size_t n = t.size();
+    size_t i = 0;
+    while (i < n && out.size() < 64) {
+        // Python tracebacks:   File "path/x.py", line 12
+        if (t.compare(i, 6, "File \"") == 0) {
+            const size_t q = t.find('"', i + 6);
+            if (q != std::string::npos && t.compare(q, 8, "\", line ") == 0) {
+                size_t j = q + 8;
+                const size_t line = readNumber(t, j);
+                if (line > 0 && q > i + 6) {
+                    FileRef r;
+                    r.start = i + 6;
+                    r.end = j;
+                    r.path = t.substr(i + 6, q - i - 6);
+                    r.line = line;
+                    out.push_back(r);
+                    i = j;
+                    continue;
+                }
+            }
+        }
+        // compilers, grep -n, linters:   path:line   path:line:col
+        if (t[i] == ':' && i > 0 && i + 1 < n && refDigit(t[i + 1]) && refPathChar(t[i - 1])) {
+            size_t k = i;
+            while (k > 0 && refPathChar(t[k - 1])) --k;
+            if (k >= 2 && t[k - 1] == ':' && refLetter(t[k - 2]) && (k == 2 || !refPathChar(t[k - 3])) &&
+                k < i && (t[k] == '\\' || t[k] == '/'))
+                k -= 2;                                                      // a drive letter: C:\dir\a.cpp
+            const bool afterScheme = k > 0 && t[k - 1] == ':';               // http://x.com:80
+            const std::string path = t.substr(k, i - k);
+            size_t j = i + 1;
+            const size_t line = readNumber(t, j);
+            size_t col = 0;
+            if (j + 1 < n && t[j] == ':' && refDigit(t[j + 1])) {
+                size_t c = j + 1;
+                col = readNumber(t, c);
+                j = c;
+            }
+            if (!afterScheme && line > 0 && looksLikeFile(path)) {
+                FileRef r;
+                r.start = k;
+                r.end = j;
+                r.path = path;
+                r.line = line;
+                r.col = col;
+                out.push_back(r);
+                i = j;
+                continue;
+            }
+        }
+        ++i;
+    }
+    return out;
+}
+
+bool fileRefAt(const std::string& text, size_t col, FileRef& out) {
+    const DynArray<FileRef> refs = findFileRefs(text);
+    for (size_t i = 0; i < refs.size(); ++i) {
+        if (refs[i].start <= col && col < refs[i].end) { out = refs[i]; return true; }
+    }
+    return false;
+}
+
 // ---------------------------------------------------------------- running the compiler
 
 static std::string lowerExt(const std::string& path) {

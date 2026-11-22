@@ -82,7 +82,7 @@ cmake --build build-console --parallel
 ./build-console/engine_tests
 ```
 
-`engine_tests` should end with `18903/18903 checks passed`.
+`engine_tests` should end with `18984/18984 checks passed`.
 
 ### 2.3 Using the console editor
 
@@ -156,7 +156,47 @@ This builds `devpad`, `console_editor`, `engine_tests` and, if the Qt Test modul
 
 A file or folder may be passed as an argument, for example `.\build\devpad.exe .` to open the project folder.
 
-### 3.3 Run the tests
+### 3.3 A short tour
+
+Please open the project folder (`.\build\devpad.exe .`) and a `.cpp` file from it, then try:
+
+| Feature | How to try it |
+|---|---|
+| Command Palette | `Ctrl+Shift+P`, type `nord` or `toggle terminal`, press Enter |
+| Code folding | hover the line numbers and click the arrow next to a `{`, or press `Ctrl+Shift+[` / `Ctrl+Shift+]` |
+| Outline | `Ctrl+F12`; click a function to jump to it, or type in the filter box |
+| Undo History | `Ctrl+Shift+H`; make a few edits, then click an earlier row to go back to it |
+| Breadcrumbs | the bar above the text; click the file name for a menu of every function |
+| Word wrap | `Alt+Z` with a long line in the file |
+| Clickable errors | introduce a syntax error, press `F5`, then click the `file.cpp:line:col` in the terminal |
+| Themes | View > Theme > Jellyfish, or `Ctrl+Shift+L` to switch between a theme's light and dark versions |
+
+`F1` lists every keyboard shortcut. Word wrap and the breadcrumbs bar can also be switched in Settings (`Ctrl+,`) > Appearance.
+
+### 3.4 Saving a picture of the window (optional)
+
+For screenshots in the report, DevPad can save an image of its own window and close again. It then uses
+separate, throw-away settings, so your session and recent files are not changed.
+
+**PowerShell**
+
+```powershell
+$env:DEVPAD_SNAPSHOT = "$PWD\devpad.png"; $env:DEVPAD_THEME = "jellyfish"; $env:DEVPAD_PANELS = "terminal outline"
+.\build\devpad.exe . .\gui\CodeView.cpp
+Remove-Item Env:DEVPAD_SNAPSHOT, Env:DEVPAD_THEME, Env:DEVPAD_PANELS
+```
+
+**Terminal**
+
+```bash
+DEVPAD_SNAPSHOT="$PWD/devpad.png" DEVPAD_THEME=jellyfish DEVPAD_PANELS="terminal outline" ./build/devpad.exe . gui/CodeView.cpp
+```
+
+`DEVPAD_THEME` takes a theme id (`midnight`, `daylight`, `nord`, `solarized-light`, `dracula`, `alucard`, `monokai`,
+`paper`, `gruvbox-dark`, `gruvbox-light`, `tokyo-night`, `one-light`, `jellyfish`, `jellyfish-light`).
+`DEVPAD_PANELS` may contain `terminal`, `problems`, `outline` and `history`. Both are optional.
+
+### 3.5 Run the tests
 
 **PowerShell**
 
@@ -183,7 +223,8 @@ ctest --test-dir build --output-on-failure
 | CMake cannot find Qt (`Qt not found - skipping`) | Pass the Qt folder: `-DCMAKE_PREFIX_PATH="C:/Qt/6.12.0/mingw_64"` |
 | `devpad.exe` reports missing `Qt6Core.dll`, `Qt6Gui.dll` or `Qt6Widgets.dll` | Run `& "C:\Qt\6.12.0\mingw_64\bin\windeployqt.exe" "build\devpad.exe"`, then start the program from `build\`. Also check that `build\platforms\qwindows.dll` exists |
 | Missing `libgcc_s_seh-1.dll`, `libstdc++-6.dll` or `libwinpthread-1.dll` | Copy them from `C:\Qt\Tools\mingw1310_64\bin` into the `build` folder |
-| `gui_tests` fails to start when run by hand | Run it through `ctest`, which sets `QT_QPA_PLATFORM=offscreen`. If it still fails, copy `C:\Qt\6.12.0\mingw_64\plugins\platforms\qoffscreen.dll` into `build\platforms\` |
+| `gui_tests` fails to start when run by hand (for example exit code `-1073740286`, without any output) | Run it through `ctest`, which sets `QT_QPA_PLATFORM=offscreen`. If it still fails, copy `C:\Qt\6.12.0\mingw_64\plugins\platforms\qoffscreen.dll` into `build\platforms\` |
+| Rebuilding stops with `ld returned 1 exit status` while linking `devpad.exe` | DevPad is still running, and Windows does not allow a running program to be replaced. Please close every DevPad window and build again |
 | A Windows PowerShell build stops with `engine/*.cpp: No such file` | PowerShell does not expand `*`; please use the PowerShell command in Section 2.1, which lists the files itself |
 | `windeployqt` warns about `dxcompiler.dll`, `dxil.dll` or skips `qopensslbackend.dll` | These warnings can be ignored; DevPad does not use those components |
 | Compiler warnings during the build | Warnings do not stop the build; only errors do |

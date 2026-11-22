@@ -34,6 +34,12 @@ public:
     Group& topUndo() { return undo_.top(); }
     void clearRedo() { redo_.clear(); }
 
+    // Read-only look at the history, for the Undo History panel. O(1) each (Stack::peek).
+    // undoStep(0) is the OLDEST step that can still be undone, undoStep(undoCount() - 1) the newest.
+    // redoStep(0) is the step Redo would apply next, redoStep(redoCount() - 1) the furthest one.
+    const Group& undoStep(size_t i) const { return undo_.peek(undo_.size() - 1 - i); }
+    const Group& redoStep(size_t i) const { return redo_.peek(i); }
+
     const std::string& nextUndoLabel() const { return undo_.top().label; }
     const std::string& nextRedoLabel() const { return redo_.top().label; }
 
