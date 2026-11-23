@@ -1,5 +1,6 @@
 // Diagnostics.cpp - see Diagnostics.h.
 #include "Diagnostics.h"
+#include "TextUtil.h"
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
@@ -16,10 +17,6 @@ const char* severityName(Severity s) {
     }
 }
 
-static bool isDigit(char c) { return c >= '0' && c <= '9'; }
-static bool isWordCh(char c) {
-    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || isDigit(c) || c == '_';
-}
 
 // Remove ANSI colour / cursor escape sequences (ESC [ ... letter).
 static std::string stripAnsi(const std::string& s) {
@@ -40,13 +37,6 @@ static bool startsWith(const std::string& s, size_t at, const char* w) {
     for (size_t i = 0; w[i]; ++i)
         if (at + i >= s.size() || s[at + i] != w[i]) return false;
     return true;
-}
-
-static std::string trim(const std::string& s) {
-    size_t a = 0, b = s.size();
-    while (a < b && (s[a] == ' ' || s[a] == '\t')) ++a;
-    while (b > a && (s[b - 1] == ' ' || s[b - 1] == '\t' || s[b - 1] == '\r')) --b;
-    return s.substr(a, b - a);
 }
 
 // After "error: " style word: which severity does the text at 'at' start with?
@@ -70,13 +60,13 @@ static bool parseLocated(const std::string& s, Diagnostic& d) {
     for (size_t p = s.find(':', from); p != std::string::npos; p = s.find(':', p + 1)) {
         size_t i = p + 1;
         size_t lineStart = i;
-        while (i < s.size() && isDigit(s[i])) ++i;
+        while (i < s.size() && isDigitChar(s[i])) ++i;
         if (i == lineStart || i >= s.size() || s[i] != ':') continue;
         size_t lineNo = static_cast<size_t>(std::strtoul(s.substr(lineStart, i - lineStart).c_str(), nullptr, 10));
         size_t colNo = 0;
         size_t j = i + 1;
         size_t colStart = j;
-        while (j < s.size() && isDigit(s[j])) ++j;
+        while (j < s.size() && isDigitChar(s[j])) ++j;
         if (j > colStart && j < s.size() && s[j] == ':') {
             colNo = static_cast<size_t>(std::strtoul(s.substr(colStart, j - colStart).c_str(), nullptr, 10));
             i = j;                                           // "line:col:" form
@@ -90,7 +80,7 @@ static bool parseLocated(const std::string& s, Diagnostic& d) {
         d.line = lineNo;
         d.col = colNo;
         d.severity = sev;
-        d.message = trim(s.substr(k + len));
+        d.message = trimSpaces(s.substr(k + len));
         return true;
     }
     return false;
@@ -99,12 +89,12 @@ static bool parseLocated(const std::string& s, Diagnostic& d) {
 // "g++: error: foo.cpp: No such file or directory"  (no line number)
 static bool parseUnlocated(const std::string& s, Diagnostic& d) {
     size_t i = 0;
-    while (i < s.size() && (isWordCh(s[i]) || s[i] == '+' || s[i] == '-' || s[i] == '.')) ++i;
+    while (i < s.size() && (isWordChar(s[i]) || s[i] == '+' || s[i] == '-' || s[i] == '.')) ++i;
     if (i == 0 || i + 1 >= s.size() || s[i] != ':' || s[i + 1] != ' ') return false;
     Severity sev;
     size_t len;
     if (!severityAt(s, i + 2, sev, len)) return false;
-    std::string msg = trim(s.substr(i + 2 + len));
+    std::string msg = trimSpaces(s.substr(i + 2 + len));
     if (msg.compare(0, 11, "ld returned") == 0) return false;    // the real cause was reported already
     d.file = "";
     d.line = 0;
@@ -132,7 +122,7 @@ DynArray<Diagnostic> parseCompilerOutput(const std::string& text, const std::str
         size_t ur = line.find("undefined reference to");
         if (ur != std::string::npos) {
             d.severity = Severity::Error;
-            d.message = trim(line.substr(ur));
+            d.message = trimSpaces(line.substr(ur));
             out.push_back(d);
             continue;
         }
@@ -160,9 +150,9 @@ DynArray<Diagnostic> fromBrackets(const BracketReport& report) {
 size_t squiggleLength(const std::string& line, size_t col0) {
     if (col0 >= line.size()) return 1;
     char c = line[col0];
-    if (isWordCh(c)) {
+    if (isWordChar(c)) {
         size_t e = col0;
-        while (e < line.size() && isWordCh(line[e])) ++e;
+        while (e < line.size() && isWordChar(line[e])) ++e;
         return e - col0;
     }
     if (c == '"') {
@@ -185,11 +175,8 @@ size_t countSeverity(const DynArray<Diagnostic>& list, Severity s) {
 // ---------------------------------------------------------------- file references in output
 
 static bool refPathChar(char c) {
-    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '-' || c == '.' ||
-           c == '/' || c == '\\' || c == '~' || c == '+';
+    return isWordChar(c) || c == '-' || c == '.' || c == '/' || c == '\\' || c == '~' || c == '+';
 }
-static bool refDigit(char c) { return c >= '0' && c <= '9'; }
-static bool refLetter(char c) { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'); }
 
 // A file name with an extension of 1..10 letters / digits (at least one letter), e.g. "a.cpp", "dir/x.h".
 static bool looksLikeFile(const std::string& p) {
@@ -200,8 +187,8 @@ static bool looksLikeFile(const std::string& p) {
     if (dot == std::string::npos || dot < nameAt || dot == nameAt || dot + 1 >= p.size() || p.size() - dot - 1 > 10) return false;
     bool letter = false;
     for (size_t i = dot + 1; i < p.size(); ++i) {
-        if (!refLetter(p[i]) && !refDigit(p[i]) && p[i] != '+') return false;
-        letter = letter || refLetter(p[i]);
+        if (!isLetterChar(p[i]) && !isDigitChar(p[i]) && p[i] != '+') return false;
+        letter = letter || isLetterChar(p[i]);
     }
     return letter;
 }
@@ -210,7 +197,7 @@ static bool looksLikeFile(const std::string& p) {
 static size_t readNumber(const std::string& t, size_t& i) {
     size_t v = 0;
     const size_t start = i;
-    while (i < t.size() && refDigit(t[i]) && i - start < 9) v = v * 10 + static_cast<size_t>(t[i++] - '0');
+    while (i < t.size() && isDigitChar(t[i]) && i - start < 9) v = v * 10 + static_cast<size_t>(t[i++] - '0');
     return v;
 }
 
@@ -238,10 +225,10 @@ DynArray<FileRef> findFileRefs(const std::string& t) {
             }
         }
         // compilers, grep -n, linters:   path:line   path:line:col
-        if (t[i] == ':' && i > 0 && i + 1 < n && refDigit(t[i + 1]) && refPathChar(t[i - 1])) {
+        if (t[i] == ':' && i > 0 && i + 1 < n && isDigitChar(t[i + 1]) && refPathChar(t[i - 1])) {
             size_t k = i;
             while (k > 0 && refPathChar(t[k - 1])) --k;
-            if (k >= 2 && t[k - 1] == ':' && refLetter(t[k - 2]) && (k == 2 || !refPathChar(t[k - 3])) &&
+            if (k >= 2 && t[k - 1] == ':' && isLetterChar(t[k - 2]) && (k == 2 || !refPathChar(t[k - 3])) &&
                 k < i && (t[k] == '\\' || t[k] == '/'))
                 k -= 2;                                                      // a drive letter: C:\dir\a.cpp
             const bool afterScheme = k > 0 && t[k - 1] == ':';               // http://x.com:80
@@ -249,7 +236,7 @@ DynArray<FileRef> findFileRefs(const std::string& t) {
             size_t j = i + 1;
             const size_t line = readNumber(t, j);
             size_t col = 0;
-            if (j + 1 < n && t[j] == ':' && refDigit(t[j + 1])) {
+            if (j + 1 < n && t[j] == ':' && isDigitChar(t[j + 1])) {
                 size_t c = j + 1;
                 col = readNumber(t, c);
                 j = c;

@@ -525,6 +525,27 @@ QPushButton#explorerOpen:hover { background: @hover@; }
 #findBar { background: @chrome@; border-top: 1px solid @border@; }
 #findCount { color: @muted@; }
 
+/* Restricted Mode (folder not trusted): banner above the tabs, button in the status bar, trust windows */
+#trustBar { background: @warn12@; border-bottom: 1px solid @warn45@; }
+#trustTitle { color: @warning@; font-weight: 600; background: transparent; }
+#trustText { color: @text@; background: transparent; }
+#trustBar QPushButton#primary { padding: 4px 14px; }
+QPushButton#trustLink { background: transparent; border: 0; color: @accent@; padding: 4px 6px; }
+QPushButton#trustLink:hover { color: @hover@; text-decoration: underline; }
+QToolButton#trustClose { border: 0; border-radius: 4px; padding: 2px; background: transparent; }
+QToolButton#trustClose:hover { background: @rowHover@; }
+QStatusBar QPushButton#restrictedButton { color: @warning@; font-weight: 600; background: @warn12@; }
+QStatusBar QPushButton#restrictedButton:hover { background: @warn45@; color: @heading@; }
+QDialog#trustDialog { background: @editor@; }
+#trustHeading { color: @heading@; font-size: 16px; font-weight: 600; background: transparent; }
+#trustPath { background: @raised@; border: 1px solid @cardBorder@; border-radius: 6px; padding: 8px 10px; color: @text@;
+             font-family: "Cascadia Mono", Consolas, monospace; }
+#trustPoint { color: @text@; background: transparent; }
+#trustHint { color: @muted@; background: transparent; }
+#trustEmpty { color: @dim@; background: @raised@; border: 1px dashed @cardBorder@; border-radius: 8px; }
+QListWidget#trustedList { background: @raised@; border: 1px solid @cardBorder@; border-radius: 8px; padding: 4px; }
+QListWidget#trustedList::item { padding: 5px 6px; border-radius: 4px; }
+
 /* welcome page */
 #welcomePage, #welcomeScroll, #welcomeInner { background: @editor@; }
 #welcomeTitle { color: @heading@; font-size: 30px; font-weight: 600; }
@@ -558,8 +579,9 @@ QPushButton#welcomeCard:hover { background: @rowHover@; border: 1px solid @accen
         {"@deep@", accentDeep().name()},       {"@hover@", accentHover().name()},     {"@soft@", accentSoft().name()},
         {"@selfg@", selectionText().name()},   {"@segfg@", g_dark ? QStringLiteral("#0f0f0f") : QStringLiteral("#ffffff")},
         {"@tabHover@", mix(Chrome, Editor, 0.5).name()},
-        {"@subhead@", mix(Text, Muted, 0.6).name()},
+        {"@subhead@", mix(Text, Muted, 0.6).name()},         {"@warning@", Warning.name()},
         {"@acc20@", rgba(Accent, 0.20)},       {"@acc55@", rgba(Accent, 0.55)},       {"@acc12@", rgba(Accent, 0.12)},
+        {"@warn12@", rgba(Warning, 0.12)},     {"@warn45@", rgba(Warning, 0.45)},
     };
     for (const Token& t : tokens) s.replace(QLatin1String(t.key), t.value);
     return s;

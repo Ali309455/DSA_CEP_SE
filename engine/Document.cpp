@@ -1,16 +1,12 @@
 #include "Document.h"
+#include "TextUtil.h"
 
-#include <cctype>
 
 struct Document::Node {
     DynArray<char> text;
     Node* prev = nullptr;
     Node* next = nullptr;
 };
-
-static bool isWordChar(char c) {
-    return std::isalnum(static_cast<unsigned char>(c)) || c == '_';
-}
 
 // ---------------------------------------------------------------- lifetime
 
@@ -95,7 +91,7 @@ std::string Document::getLine(size_t line) const {
 }
 
 std::string Document::getRange(Pos a, Pos b) const {
-    if (b < a) { Pos t = a; a = b; b = t; }
+    orderPos(a, b);
     checkPos(a);
     checkPos(b);
     std::string out;
@@ -159,7 +155,7 @@ Pos Document::insertText(Pos at, const std::string& text) {
 }
 
 std::string Document::deleteRange(Pos a, Pos b) {
-    if (b < a) { Pos t = a; a = b; b = t; }
+    orderPos(a, b);
     checkPos(a);
     checkPos(b);
     if (a == b) return std::string();

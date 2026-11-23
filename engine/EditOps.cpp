@@ -194,7 +194,7 @@ bool isEmptyPairAround(const Document& doc, Pos at) {
 }
 
 SelRange surroundSelection(Editor& ed, Pos a, Pos b, char open) {
-    if (b < a) { Pos t = a; a = b; b = t; }
+    orderPos(a, b);
     char close = pairCloser(open);
     if (close == 0) throw std::invalid_argument(std::string("'") + open + "' does not have a closing partner.");
     if (a == b) throw std::invalid_argument("Nothing is selected.");
@@ -221,7 +221,7 @@ static char pairOpener(char c) {
 }
 
 bool isWrappedBy(const Document& doc, Pos a, Pos b, char c) {
-    if (b < a) { Pos t = a; a = b; b = t; }
+    orderPos(a, b);
     const char open = pairOpener(c);
     if (open == 0 || a == b) return false;
     if (a.line >= doc.lineCount() || b.line >= doc.lineCount()) return false;
@@ -232,7 +232,7 @@ bool isWrappedBy(const Document& doc, Pos a, Pos b, char c) {
 }
 
 SelRange unwrapSelection(Editor& ed, Pos a, Pos b, char c) {
-    if (b < a) { Pos t = a; a = b; b = t; }
+    orderPos(a, b);
     if (!isWrappedBy(ed.doc(), a, b, c)) throw std::invalid_argument("The selection is not wrapped by that pair.");
     EditGroup g(ed, "unwrap");
     ed.deleteRange(b, Pos{b.line, b.col + 1});       // closer first: it does not move 'a'
@@ -244,7 +244,7 @@ SelRange unwrapSelection(Editor& ed, Pos a, Pos b, char c) {
 }
 
 SelRange toggleSurround(Editor& ed, Pos a, Pos b, char c, bool* changed) {
-    if (b < a) { Pos t = a; a = b; b = t; }
+    orderPos(a, b);
     if (changed) *changed = true;
     if (isWrappedBy(ed.doc(), a, b, c)) return unwrapSelection(ed, a, b, c);
     if (pairCloser(c) != 0) return surroundSelection(ed, a, b, c);

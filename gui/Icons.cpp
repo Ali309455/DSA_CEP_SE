@@ -209,6 +209,20 @@ void paintGlyph(QPainter& p, Glyph g, const QColor& c) {
             line(12, 9.5, 12, 14);
             line(12, 17, 12, 17.01);
             break;
+        case Shield:      // shield with an exclamation mark
+            path.moveTo(12, 3); path.lineTo(19.5, 6); path.lineTo(19.5, 11.5);
+            path.cubicTo(19.5, 16, 16.5, 19.3, 12, 21); path.cubicTo(7.5, 19.3, 4.5, 16, 4.5, 11.5);
+            path.lineTo(4.5, 6); path.closeSubpath();
+            p.drawPath(path);
+            line(12, 8, 12, 12.5);
+            line(12, 15.5, 12, 15.51);
+            break;
+        case Lock:        // padlock: shackle and body
+            p.drawRoundedRect(QRectF(5.5, 10.5, 13, 10), 2, 2);
+            path.moveTo(8.5, 10.5); path.lineTo(8.5, 7.5); path.arcTo(QRectF(8.5, 4, 7, 7), 180, -180); path.lineTo(15.5, 10.5);
+            p.drawPath(path);
+            line(12, 14.5, 12, 16.5);
+            break;
     }
 }
 

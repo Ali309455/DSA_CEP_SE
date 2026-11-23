@@ -2,6 +2,7 @@
 #include <cstring>
 #include "Editor.h"
 #include "Stack.h"
+#include "TextUtil.h"
 
 namespace {
 
@@ -24,9 +25,9 @@ struct LexState {
     char quote = 0;
 };
 
-bool isDigit(char c) { return c >= '0' && c <= '9'; }
+
 bool isIdStart(char c) { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_' || static_cast<unsigned char>(c) >= 0x80; }
-bool isIdChar(char c) { return isIdStart(c) || isDigit(c); }
+bool isIdChar(char c) { return isIdStart(c) || isDigitChar(c); }
 bool isBlank(char c) { return c == ' ' || c == '\t' || c == '\r'; }
 
 bool inList(const std::string& w, const char* const* list) {
@@ -104,7 +105,7 @@ void lexLine(const std::string& s, LexState& st, DynArray<Tok>& out) {
             i = j;
             continue;
         }
-        if (isDigit(c) || (c == '.' && i + 1 < n && isDigit(s[i + 1]))) {   // 42, 3.14, 1e-5, 0xFF, 1'000'000, 2.5f
+        if (isDigitChar(c) || (c == '.' && i + 1 < n && isDigitChar(s[i + 1]))) {   // 42, 3.14, 1e-5, 0xFF, 1'000'000, 2.5f
             const bool hex = c == '0' && i + 1 < n && (s[i + 1] == 'x' || s[i + 1] == 'X');
             size_t j = i + 1;
             while (j < n) {
@@ -288,6 +289,15 @@ struct PrevCode {
     bool lastIsWord = false;
     bool label = false;              // case / access specifier / goto label
     DynArray<std::string> words;     // its words, for a '{' alone on the next line (Allman style)
+
+    // A line that ended with 'lastTok' (label and words are filled in by the caller if needed).
+    void set(const std::string& lastTok, bool isWord) {
+        exists = true;
+        last = lastTok;
+        lastIsWord = isWord;
+        label = false;
+        words.clear();
+    }
 };
 
 // "if (x)", "for (...)", "else", "do" without a brace: the next line is their one-statement body
@@ -307,6 +317,76 @@ struct PPFrame {
     IndentState afterFirst;          // the state at the end of the first branch: what follows #endif sees
     bool sawElse = false;
 };
+
+// A closing ) ] or }: pop up to and including its opener (stray openers in between go too).
+// A closer without an opener is ignored.
+void closeBracket(Stack<Open>& stack, const std::string& closer) {
+    const char want = closer == "}" ? '{' : closer == ")" ? '(' : '[';
+    size_t depth = 0;
+    while (depth < stack.size() && stack.peek(depth).ch != want) ++depth;
+    if (depth < stack.size())
+        for (size_t k = 0; k <= depth; ++k) stack.pop();
+}
+
+bool isOpener(const Tok& t) { return t.kind == Kind::Punct && (t.text == "{" || t.text == "(" || t.text == "["); }
+bool isCloser(const Tok& t) { return t.kind == Kind::Punct && (t.text == "}" || t.text == ")" || t.text == "]"); }
+
+// #if / #elif / #else / #endif: every branch is indented from the state where the #if began, and what
+// follows #endif continues from the end of the first branch. 't' is the line, 'fnb' where '#' is.
+void trackPreprocessor(const std::string& t, size_t fnb, IndentState& is, DynArray<PPFrame>& pp) {
+    size_t k = fnb + 1;
+    while (k < t.size() && isBlank(t[k])) ++k;
+    size_t e = k;
+    while (e < t.size() && isIdChar(t[e])) ++e;
+    const std::string dir = t.substr(k, e - k);
+    if (dir == "if" || dir == "ifdef" || dir == "ifndef") {
+        PPFrame f;
+        f.atIf = is;
+        pp.push_back(f);
+    } else if ((dir == "elif" || dir == "else" || dir == "elifdef" || dir == "elifndef") && !pp.empty()) {
+        PPFrame& f = pp[pp.size() - 1];
+        if (!f.sawElse) { f.afterFirst = is; f.sawElse = true; }
+        is = f.atIf;
+    } else if (dir == "endif" && !pp.empty()) {
+        if (pp[pp.size() - 1].sawElse) is = pp[pp.size() - 1].afterFirst;
+        pp.pop_back();
+    }
+}
+
+// The header that owns a '{' at toks[at]: the words before it on its line, or (brace alone on its
+// line, Allman style) the words of the line above.
+DynArray<std::string> braceHeader(const DynArray<Tok>& toks, size_t at, const PrevCode& prev) {
+    DynArray<std::string> words;
+    bool codeBefore = false;
+    for (size_t k = 0; k < at; ++k) {
+        if (toks[k].kind == Kind::Comment) continue;
+        codeBefore = true;
+        if (toks[k].kind == Kind::Word) words.push_back(toks[k].text);
+    }
+    return codeBefore ? words : prev.words;
+}
+
+// namespace / inline namespace / extern "C" bodies are not indented
+bool isNamespaceHeader(const DynArray<std::string>& words) {
+    if (words.empty()) return false;
+    if (words[0] == "namespace") return true;
+    if (words[0] == "inline" && words.size() > 1 && words[1] == "namespace") return true;
+    return words[0] == "extern" && words.size() == 1;
+}
+
+bool isSwitchHeader(const DynArray<std::string>& words) {
+    for (size_t k = 0; k < words.size(); ++k)
+        if (words[k] == "switch") return true;
+    return false;
+}
+
+// The screen column of byte 'at' in 'line' (tabs expanded to 'tabW').
+long columnAt(const std::string& line, size_t at, size_t tabW) {
+    const long tw = static_cast<long>(tabW);
+    long col = 0;
+    for (size_t k = 0; k < at; ++k) col += line[k] == '\t' ? tw - col % tw : 1;
+    return col;
+}
 
 }  // namespace
 
@@ -344,26 +424,19 @@ DynArray<std::string> formatLines(const DynArray<std::string>& lines, const Form
             // (usually ';') for deciding whether the next line continues this statement
             for (size_t i = 1; i < toks.size(); ++i) {
                 const Tok& t = toks[i];
-                if (t.kind != Kind::Punct) continue;
-                if (t.text == "{" || t.text == "(" || t.text == "[") {
+                if (isOpener(t)) {
                     Open o;
                     o.ch = t.text[0];
                     o.openerCols = lastAnchorCols;
                     o.contentCols = lastAnchorCols + (o.ch == '{' ? w : 0);
                     stack.push(o);
-                } else if (t.text == "}" || t.text == ")" || t.text == "]") {
-                    const char want = t.text == "}" ? '{' : t.text == ")" ? '(' : '[';
-                    size_t depth = 0;
-                    while (depth < stack.size() && stack.peek(depth).ch != want) ++depth;
-                    if (depth < stack.size()) for (size_t k = 0; k <= depth; ++k) stack.pop();
+                } else if (isCloser(t)) {
+                    closeBracket(stack, t.text);
                 }
             }
-            if (!st.inRaw && !st.inString && toks.size() > 1 && toks[toks.size() - 1].kind != Kind::Comment) {
-                prev.exists = true;
-                prev.last = toks[toks.size() - 1].text;
-                prev.lastIsWord = toks[toks.size() - 1].kind == Kind::Word;
-                prev.label = false;
-                prev.words.clear();
+            if (!st.inRaw && !st.inString && toks.size() > 1) {
+                const Tok& lastTok = toks[toks.size() - 1];
+                if (lastTok.kind != Kind::Comment) prev.set(lastTok.text, lastTok.kind == Kind::Word);
             }
             continue;
         }
@@ -379,26 +452,7 @@ DynArray<std::string> formatLines(const DynArray<std::string>& lines, const Form
         if (!st0.inBlock && (preprocCont || line[fnb] == '#')) {
             const std::string t = rtrim(line);
             out.push_back(t);
-            if (!preprocCont) {
-                // #if / #else / #endif: each branch is indented from the state where the #if began
-                size_t k = fnb + 1;
-                while (k < t.size() && isBlank(t[k])) ++k;
-                size_t e = k;
-                while (e < t.size() && isIdChar(t[e])) ++e;
-                const std::string dir = t.substr(k, e - k);
-                if (dir == "if" || dir == "ifdef" || dir == "ifndef") {
-                    PPFrame f;
-                    f.atIf = is;
-                    pp.push_back(f);
-                } else if ((dir == "elif" || dir == "else" || dir == "elifdef" || dir == "elifndef") && !pp.empty()) {
-                    PPFrame& f = pp[pp.size() - 1];
-                    if (!f.sawElse) { f.afterFirst = is; f.sawElse = true; }
-                    is = f.atIf;
-                } else if (dir == "endif" && !pp.empty()) {
-                    if (pp[pp.size() - 1].sawElse) is = pp[pp.size() - 1].afterFirst;
-                    pp.pop_back();
-                }
-            }
+            if (!preprocCont) trackPreprocessor(t, fnb, is, pp);
             preprocCont = !t.empty() && t[t.size() - 1] == '\\';
             continue;
         }
@@ -457,10 +511,7 @@ DynArray<std::string> formatLines(const DynArray<std::string>& lines, const Form
 
         // remember a trailing // comment: a comment-only line below that starts in its column continues it
         if (!code.empty() && toks[toks.size() - 1].kind == Kind::Comment && toks[toks.size() - 1].text.compare(0, 2, "//") == 0) {
-            const size_t at = line.size() - toks[toks.size() - 1].text.size();
-            long col = 0;
-            for (size_t k = 0; k < at; ++k) col += line[k] == '\t' ? static_cast<long>(tabW) - col % static_cast<long>(tabW) : 1;
-            trailingCommentCol = col;
+            trailingCommentCol = columnAt(line, line.size() - toks[toks.size() - 1].text.size(), tabW);
             trailingCommentDelta = delta;
         } else if (!(code.empty() && oldCols == trailingCommentCol)) {
             trailingCommentCol = -1;
@@ -470,28 +521,14 @@ DynArray<std::string> formatLines(const DynArray<std::string>& lines, const Form
         if (caseLine && !stack.empty()) stack.top().caseOpen = true;
         for (size_t i = 0; i < toks.size(); ++i) {
             const Tok& t = toks[i];
-            if (t.kind != Kind::Punct) continue;
-            if (t.text == "{" || t.text == "(" || t.text == "[") {
+            if (isOpener(t)) {
                 Open o;
                 o.ch = t.text[0];
                 o.delta = delta;
                 if (o.ch == '{') {
-                    // the header that owns the brace: words before it on this line, or the line above
-                    DynArray<std::string> words;
-                    bool codeBefore = false;
-                    for (size_t k = 0; k < i; ++k) {
-                        if (toks[k].kind == Kind::Comment) continue;
-                        codeBefore = true;
-                        if (toks[k].kind == Kind::Word) words.push_back(toks[k].text);
-                    }
-                    if (!codeBefore) words = prev.words;
-                    bool isNamespace = false;
-                    for (size_t k = 0; k < words.size(); ++k) {
-                        if (words[k] == "switch") o.isSwitch = true;
-                    }
-                    if (!words.empty() && (words[0] == "namespace" || (words[0] == "inline" && words.size() > 1 && words[1] == "namespace") ||
-                                           (words[0] == "extern" && words.size() == 1)))
-                        isNamespace = true;                             // namespace / extern "C" bodies are not indented
+                    const DynArray<std::string> words = braceHeader(toks, i, prev);
+                    o.isSwitch = isSwitchHeader(words);
+                    const bool isNamespace = isNamespaceHeader(words);
                     // a brace on a continuation line belongs to the statement that started above
                     // ("int b) {" ends a header that began on an earlier line) - except the body line of a
                     // brace-less if / for / else, which is a statement of its own ("for (...) {" under "for (...)")
@@ -506,21 +543,16 @@ DynArray<std::string> formatLines(const DynArray<std::string>& lines, const Form
                     o.openerCols = newCols;
                 }
                 stack.push(o);
-            } else if (t.text == "}" || t.text == ")" || t.text == "]") {
-                const char want = t.text == "}" ? '{' : t.text == ")" ? '(' : '[';
-                size_t depth = 0;                                       // find the matching opener (skips stray ones)
-                while (depth < stack.size() && stack.peek(depth).ch != want) ++depth;
-                if (depth < stack.size()) for (size_t k = 0; k <= depth; ++k) stack.pop();
+            } else if (isCloser(t)) {
+                closeBracket(stack, t.text);
             }
         }
 
         // 7. remember this line for the next one
         if (!code.empty() && !st0.inBlock) {
-            prev.exists = true;
-            prev.last = code[code.size() - 1]->text;
-            prev.lastIsWord = code[code.size() - 1]->kind == Kind::Word;
+            const Tok& lastCode = *code[code.size() - 1];
+            prev.set(lastCode.text, lastCode.kind == Kind::Word);
             prev.label = isCaseLabel(code) || isAccessSpecifier(code) || isPlainLabel(code);
-            prev.words.clear();
             for (size_t k = 0; k < code.size(); ++k) if (code[k]->kind == Kind::Word) prev.words.push_back(code[k]->text);
         }
     }

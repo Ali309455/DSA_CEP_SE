@@ -2,10 +2,6 @@
 #include "Assist.h"
 #include <stdexcept>
 
-bool isWordChar(char c) {
-    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_';
-}
-
 std::string prefixBefore(const Document& doc, Pos cursor, Pos* start) {
     if (cursor.line >= doc.lineCount()) throw std::out_of_range("Line " + std::to_string(cursor.line + 1) + " does not exist.");
     const std::string line = doc.getLine(cursor.line);

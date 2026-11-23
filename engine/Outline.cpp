@@ -1,24 +1,15 @@
 #include "Outline.h"
 #include "Stack.h"
+#include "TextUtil.h"
 
 namespace {
-
-bool isIdent(char c) { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_'; }
-bool isSpace(char c) { return c == ' ' || c == '\t' || c == '\n' || c == '\r'; }
-
-std::string trim(const std::string& s) {
-    size_t a = 0, b = s.size();
-    while (a < b && isSpace(s[a])) ++a;
-    while (b > a && isSpace(s[b - 1])) --b;
-    return s.substr(a, b - a);
-}
 
 // "a   b\n c" -> "a b c"
 std::string squeeze(const std::string& s) {
     std::string out;
     bool space = false;
     for (char c : s) {
-        if (isSpace(c)) { space = true; continue; }
+        if (isSpaceChar(c)) { space = true; continue; }
         if (space && !out.empty()) out.push_back(' ');
         space = false;
         out.push_back(c);
@@ -35,8 +26,8 @@ std::string codePart(const std::string& line) {
 bool startsWithWord(const std::string& s, size_t at, const char* w) {
     size_t i = 0;
     for (; w[i]; ++i) if (at + i >= s.size() || s[at + i] != w[i]) return false;
-    if (at > 0 && isIdent(s[at - 1])) return false;
-    return at + i >= s.size() || !isIdent(s[at + i]);
+    if (at > 0 && isWordChar(s[at - 1])) return false;
+    return at + i >= s.size() || !isWordChar(s[at + i]);
 }
 
 // The header of the '{' at 'open': its line up to the brace, plus earlier lines while a ')' has no
@@ -48,10 +39,10 @@ std::string headerOf(const Document& doc, Pos open, size_t& firstLine) {
     for (int walk = 0; walk < 6 && firstLine > 0; ++walk) {
         int balance = 0;
         for (char c : h) { if (c == '(') --balance; else if (c == ')') ++balance; }
-        const std::string ht = trim(h);
+        const std::string ht = trimSpaces(h);
         const bool blank = ht.empty();
         const std::string prev = codePart(doc.getLine(firstLine - 1));
-        const std::string t = trim(prev);
+        const std::string t = trimSpaces(prev);
         // more to read: an unopened ')', a brace on its own line, or a constructor's ": a(1), b(2)" list
         const bool more = blank || balance > 0 || ht[0] == ':' || ht[0] == ',' || (!t.empty() && t[t.size() - 1] == ',');
         if (!more) break;
@@ -92,7 +83,7 @@ bool classLike(const std::string& h, size_t firstLine, Candidate& out) {
     size_t i = 0;
     const std::string t = h;
     size_t start = 0;
-    while (start < t.size() && isSpace(t[start])) ++start;
+    while (start < t.size() && isSpaceChar(t[start])) ++start;
     if (startsWithWord(t, start, "template")) {                         // skip template <...>
         size_t k = t.find('<', start);
         int depth = 0;
@@ -112,7 +103,7 @@ bool classLike(const std::string& h, size_t firstLine, Candidate& out) {
         if (c == '(') ++paren;
         else if (c == ')') --paren;
         else if (c == '=' || c == ';') return false;                    // an initializer, not a definition
-        if (paren != 0 || !isIdent(c) || (i > 0 && isIdent(t[i - 1]))) continue;
+        if (paren != 0 || !isWordChar(c) || (i > 0 && isWordChar(t[i - 1]))) continue;
         for (const Kw& kw : kws) {
             if (!startsWithWord(t, i, kw.word)) continue;
             size_t j = i + std::string(kw.word).size();
@@ -121,10 +112,10 @@ bool classLike(const std::string& h, size_t firstLine, Candidate& out) {
             std::string name;
             size_t nameAt = j;
             while (j < t.size()) {
-                if (isSpace(t[j])) { ++j; continue; }
+                if (isSpaceChar(t[j])) { ++j; continue; }
                 if (t[j] == ':' && !(j + 1 < t.size() && t[j + 1] == ':')) break;   // base classes / underlying type
                 const size_t a = j;
-                while (j < t.size() && (isIdent(t[j]) || (t[j] == ':' && j + 1 < t.size() && t[j + 1] == ':')))
+                while (j < t.size() && (isWordChar(t[j]) || (t[j] == ':' && j + 1 < t.size() && t[j + 1] == ':')))
                     j += (t[j] == ':') ? 2 : 1;                         // "a::b" stays one name
                 if (j == a) { ++j; continue; }                          // some other character: skip it
                 const std::string w = t.substr(a, j - a);
@@ -154,19 +145,19 @@ bool functionLike(const std::string& t, size_t firstLine, Candidate& out) {
 
     // the name in front of the '('
     size_t e = open;
-    while (e > 0 && isSpace(t[e - 1])) --e;
+    while (e > 0 && isSpaceChar(t[e - 1])) --e;
     size_t a = e;
-    while (a > 0 && (isIdent(t[a - 1]) || t[a - 1] == ':' || t[a - 1] == '~')) --a;
+    while (a > 0 && (isWordChar(t[a - 1]) || t[a - 1] == ':' || t[a - 1] == '~')) --a;
     std::string name = t.substr(a, e - a);
     const size_t op = t.rfind("operator", open);
     if (op != std::string::npos && op < open && startsWithWord(t, op, "operator") &&
-        trim(t.substr(op + 8, open - op - 8)).find_first_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_") == std::string::npos) {
+        trimSpaces(t.substr(op + 8, open - op - 8)).find_first_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_") == std::string::npos) {
         // operator== / operator() / operator[] ...: the name runs from "operator" to the parameter list
         a = op;
-        while (a > 0 && (isIdent(t[a - 1]) || t[a - 1] == ':' || t[a - 1] == '~')) --a;
+        while (a > 0 && (isWordChar(t[a - 1]) || t[a - 1] == ':' || t[a - 1] == '~')) --a;
         if (t.compare(open, 2, "()") == 0) {                            // operator()(...): the second '(' has the parameters
             size_t k = open + 2;
-            while (k < t.size() && isSpace(t[k])) ++k;
+            while (k < t.size() && isSpaceChar(t[k])) ++k;
             if (k < t.size() && t[k] == '(') open = k;
         }
         name = squeeze(t.substr(a, open - a));
@@ -175,9 +166,9 @@ bool functionLike(const std::string& t, size_t firstLine, Candidate& out) {
     if (name.empty() || name == "operator" || notAFunction(name) || (name[0] >= '0' && name[0] <= '9')) return false;
 
     // what comes before the name must look like a return type: identifiers, ::, <>, *, &, [[...]]
-    const std::string before = trim(t.substr(0, a));
+    const std::string before = trimSpaces(t.substr(0, a));
     for (char c : before)
-        if (!(isIdent(c) || isSpace(c) || c == ':' || c == '<' || c == '>' || c == '*' || c == '&' || c == ',' || c == '[' || c == ']'))
+        if (!(isWordChar(c) || isSpaceChar(c) || c == ':' || c == '<' || c == '>' || c == '*' || c == '&' || c == ',' || c == '[' || c == ']'))
             return false;
     if (!before.empty()) {
         const char last = before[before.size() - 1];
@@ -193,7 +184,7 @@ bool functionLike(const std::string& t, size_t firstLine, Candidate& out) {
         else if (t[i] == ')' && --p == 0) { close = i; break; }
     }
     if (close == std::string::npos) return false;
-    const std::string rest = trim(t.substr(close + 1));
+    const std::string rest = trimSpaces(t.substr(close + 1));
     if (rest.find(';') != std::string::npos || rest.find('=') != std::string::npos) return false;
     if (!rest.empty()) {
         static const char* const ok[] = {"const", "override", "final", "noexcept", "->", ":", "volatile", "&", "throw", "try", "requires", "mutable", nullptr};
@@ -260,7 +251,7 @@ DynArray<Symbol> outlineSymbols(const Document& doc, const BracketReport& report
         while (!open.empty() && closeOf[open.top()] < bp.open) open.pop();
         size_t firstLine = 0;
         const std::string h = headerOf(doc, bp.open, firstLine);
-        if (trim(h).empty()) continue;
+        if (trimSpaces(h).empty()) continue;
         Candidate c;
         if (!classLike(h, firstLine, c) && !functionLike(h, firstLine, c)) continue;
         if (c.needsClass) {                          // a constructor / destructor written inside its class
@@ -295,14 +286,14 @@ DynArray<Symbol> outlineScriptSymbols(const Document& doc, size_t tabWidth) {
 
         SymbolKind kind = SymbolKind::Function;
         size_t j = i;
-        if (startsWithWord(s, j, "async")) { j += 5; while (j < s.size() && isSpace(s[j])) ++j; }
+        if (startsWithWord(s, j, "async")) { j += 5; while (j < s.size() && isSpaceChar(s[j])) ++j; }
         if (startsWithWord(s, j, "def")) j += 3;
         else if (startsWithWord(s, j, "function")) j += 8;
         else if (startsWithWord(s, j, "class")) { j += 5; kind = SymbolKind::Class; }
         else continue;
-        while (j < s.size() && isSpace(s[j])) ++j;
+        while (j < s.size() && isSpaceChar(s[j])) ++j;
         const size_t a = j;
-        while (j < s.size() && isIdent(s[j])) ++j;
+        while (j < s.size() && isWordChar(s[j])) ++j;
         if (j == a) continue;
         Symbol sym;
         sym.kind = kind;

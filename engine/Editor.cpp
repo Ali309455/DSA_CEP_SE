@@ -1,4 +1,5 @@
 #include "Editor.h"
+#include "TextUtil.h"
 #include <stdexcept>
 #include <string>
 
@@ -47,7 +48,7 @@ Pos Editor::insertText(Pos at, const std::string& text) {
 }
 
 std::string Editor::deleteRange(Pos a, Pos b) {
-    if (b < a) { Pos t = a; a = b; b = t; }
+    orderPos(a, b);
     std::string removed = doc_.deleteRange(a, b);
     if (!removed.empty()) record(CmdType::Delete, a, b, removed, "delete");
     return removed;
@@ -98,7 +99,7 @@ std::string Editor::deleteLines(size_t from, size_t to) {
 }
 
 Pos Editor::replaceRange(Pos a, Pos b, const std::string& text) {
-    if (b < a) { Pos t = a; a = b; b = t; }
+    orderPos(a, b);
     EditGroup g(*this, "replace");
     deleteRange(a, b);                                   // validates both positions first
     return insertText(a, text);
@@ -108,9 +109,8 @@ Pos Editor::replaceRange(Pos a, Pos b, const std::string& text) {
 
 // 0 = letter / digit / '_' (bytes >= 0x80 are parts of UTF-8 letters), 1 = blank, 2 = other.
 static int charClass(char c) {
-    unsigned char u = static_cast<unsigned char>(c);
-    if (u >= 0x80 || (u >= '0' && u <= '9') || (u >= 'a' && u <= 'z') || (u >= 'A' && u <= 'Z') || u == '_') return 0;
-    if (u == ' ' || u == '\t') return 1;
+    if (isWordChar(c) || static_cast<unsigned char>(c) >= 0x80) return 0;
+    if (c == ' ' || c == '\t') return 1;
     return 2;
 }
 
@@ -151,7 +151,7 @@ Pos Editor::typeText(Pos at, const std::string& text) {
 }
 
 std::string Editor::eraseCoalescing(Pos a, Pos b) {
-    if (b < a) { Pos t = a; a = b; b = t; }
+    orderPos(a, b);
     const bool single = (a.line == b.line);
     const bool chain = depth_ == 0 && single && run_ == Run::Erase && um_.canUndo() && um_.undoCount() == runCount_;
     std::string removed = doc_.deleteRange(a, b);   // throws on a bad range: nothing recorded

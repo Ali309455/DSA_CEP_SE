@@ -1265,10 +1265,11 @@ void CodeView::paintEvent(QPaintEvent*) {
         if (hasFocus() && cursorOn_ && l == cur_.line) {
             const int dc = displayCol(raw, cur_.col);
             const int cx = xAt(dc), cy = yAt(dc);
+            const QColor caret = readOnly_ ? Theme::Dim : kCursorCol;          // read-only: a grey caret, nothing can be typed
             switch (prefs().cursorStyle) {
-                case 1: { QColor c = kCursorCol; c.setAlpha(150); p.fillRect(cx, cy, charW_, lineH_, c); break; }   // block: the character shows through
-                case 2: p.fillRect(cx, cy + lineH_ - 3, charW_, 2, kCursorCol); break;                               // underline
-                default: p.fillRect(cx, cy, 2, lineH_, kCursorCol); break;                                           // line
+                case 1: { QColor c = caret; c.setAlpha(150); p.fillRect(cx, cy, charW_, lineH_, c); break; }   // block: the character shows through
+                case 2: p.fillRect(cx, cy + lineH_ - 3, charW_, 2, caret); break;                               // underline
+                default: p.fillRect(cx, cy, 2, lineH_, caret); break;                                           // line
             }
         }
 

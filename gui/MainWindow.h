@@ -191,7 +191,9 @@ private:
     QString root_;
     bool rootChosen_ = false;
     QWidget* trustBar_ = nullptr;                          // "Restricted Mode" banner above the tabs
+    QLabel* trustIcon_ = nullptr;
     QLabel* trustText_ = nullptr;
+    QString trustBarClosedFor_;                            // the banner's × hides it for this folder until it changes
     QPushButton* restrictedBtn_ = nullptr;                 // status bar: "Restricted Mode", click to trust
     QAction* trustAct_ = nullptr;                          // File > Trust This Folder / Restrict This Folder
     void applyTrust();                                     // read-only tabs, explorer, terminal, banner

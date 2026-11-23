@@ -59,6 +59,7 @@
 #include "SyntaxChecker.h"
 #include "Runner.h"
 #include "Trust.h"
+#include "TrustDialog.h"
 #include <QStandardPaths>
 #include "FileIO.h"
 #include "Workspace.h"
@@ -113,23 +114,45 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     {
         trustBar_ = new QFrame(editorArea_);
         trustBar_->setObjectName("trustBar");
+        // [shield] Restricted Mode  "demo" is not trusted: files are read-only ...   [Trust Folder…] Manage  ×
         QHBoxLayout* tl = new QHBoxLayout(trustBar_);
-        tl->setContentsMargins(12, 5, 8, 5);
-        tl->setSpacing(8);
+        tl->setContentsMargins(14, 6, 8, 6);
+        tl->setSpacing(10);
+        trustIcon_ = new QLabel(trustBar_);
+        trustIcon_->setFixedSize(18, 18);
+        QLabel* title = new QLabel("Restricted Mode", trustBar_);
+        title->setObjectName("trustTitle");
         trustText_ = new QLabel(trustBar_);
         trustText_->setObjectName("trustText");
-        trustText_->setWordWrap(true);
-        QPushButton* trustBtn = new QPushButton("Trust Folder", trustBar_);
-        trustBtn->setObjectName("trustButton");
+        trustText_->setMinimumWidth(40);                      // long folder names shrink instead of widening the window
+        trustText_->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+        trustText_->installEventFilter(this);                 // re-cut the text with "…" when the bar is resized
+        QPushButton* trustBtn = new QPushButton("Trust Folder…", trustBar_);
+        trustBtn->setObjectName("primary");
         trustBtn->setCursor(Qt::PointingHandCursor);
+        trustBtn->setFocusPolicy(Qt::NoFocus);
         trustBtn->setToolTip("Allow editing, the terminal, Run (F5) and the compiler check for this folder");
         connect(trustBtn, &QPushButton::clicked, this, [this]() { askTrust(trustTarget()); });
-        QPushButton* manageBtn = new QPushButton("Manage…", trustBar_);
+        QPushButton* manageBtn = new QPushButton("Manage", trustBar_);
+        manageBtn->setObjectName("trustLink");
+        manageBtn->setFlat(true);
         manageBtn->setCursor(Qt::PointingHandCursor);
+        manageBtn->setFocusPolicy(Qt::NoFocus);
         connect(manageBtn, &QPushButton::clicked, this, [this]() { manageTrustedFolders(); });
+        QToolButton* closeBtn = new QToolButton(trustBar_);
+        closeBtn->setObjectName("trustClose");
+        closeBtn->setIcon(Icons::get(Icons::Close));
+        closeBtn->setIconSize(QSize(14, 14));
+        closeBtn->setAutoRaise(true);
+        closeBtn->setFocusPolicy(Qt::NoFocus);
+        closeBtn->setToolTip("Hide this bar (the status bar still shows Restricted Mode)");
+        connect(closeBtn, &QToolButton::clicked, this, [this]() { trustBarClosedFor_ = trustTarget(); trustBar_->hide(); });
+        tl->addWidget(trustIcon_);
+        tl->addWidget(title);
         tl->addWidget(trustText_, 1);
         tl->addWidget(trustBtn);
         tl->addWidget(manageBtn);
+        tl->addWidget(closeBtn);
         trustBar_->hide();
     }
     lay->addWidget(trustBar_);
@@ -380,6 +403,10 @@ bool MainWindow::eventFilter(QObject* o, QEvent* e) {
     if ((o == tabs_ || (tabs_ && o == tabs_->tabBar())) &&
         (e->type() == QEvent::Resize || e->type() == QEvent::Move || e->type() == QEvent::Show || e->type() == QEvent::LayoutRequest))
         QTimer::singleShot(0, this, [this]() { placeRunGroup(); });   // after Qt finished its own layout
+    if (o == trustText_ && e->type() == QEvent::Resize) {             // Restricted Mode bar: fit the text to its new width
+        const QString full = trustText_->property("fullText").toString();
+        trustText_->setText(trustText_->fontMetrics().elidedText(full, Qt::ElideRight, trustText_->width()));
+    }
     return QMainWindow::eventFilter(o, e);
 }
 
@@ -404,14 +431,11 @@ void MainWindow::onThemeChanged() {
                                   .arg(Theme::schemeName(id), Theme::schemeName(Theme::toggledScheme(id))));
     }
     refreshRunButtons();
-    if (trustBar_) {
-        const QString warn = Theme::Warning.name();
-        trustBar_->setStyleSheet(QString("#trustBar { background: %1; border-bottom: 1px solid %2; }"
-                                         "#trustText { color: %3; }")
-                                     .arg(Theme::Raised.name(), warn, Theme::Text.name()));
-        restrictedBtn_->setStyleSheet(QString("#restrictedButton { color: %1; font-weight: bold; }").arg(warn));
-        restrictedBtn_->setIcon(Icons::get(Icons::Warning, Theme::Warning, Theme::Warning));
+    if (trustIcon_) {                                      // colours of the bar itself come from Theme.cpp's style sheet
+        trustIcon_->setPixmap(Icons::get(Icons::Shield, Theme::Warning, Theme::Warning).pixmap(18, 18));
+        restrictedBtn_->setIcon(Icons::get(Icons::Shield, Theme::Warning, Theme::Warning));
     }
+    for (int i = 0; tabs_ && i < tabs_->count(); ++i) refreshTab(viewAt(i));   // the lock icon on read-only tabs
     if (issueBtn_) {
         const bool clean = issueBtn_->text() == QLatin1String("No problems");
         issueBtn_->setIcon(clean ? Icons::get(Icons::Check, Theme::Success, Theme::Success)
@@ -1183,7 +1207,8 @@ void MainWindow::refreshTab(CodeView* v) {
     QString name = path.isEmpty() ? v->property("untitledName").toString() : QFileInfo(path).fileName();
     if (v->editor().doc().modified()) name += QStringLiteral(" ●");
     tabs_->setTabText(i, name);
-    tabs_->setTabIcon(i, Icons::forFile(path.isEmpty() ? QStringLiteral("untitled.txt") : path));
+    tabs_->setTabIcon(i, v->isReadOnly() ? Icons::get(Icons::Lock, Theme::Warning, Theme::Warning)     // read-only (Restricted Mode)
+                                         : Icons::forFile(path.isEmpty() ? QStringLiteral("untitled.txt") : path));
     QString tip = path.isEmpty() ? name : QDir::toNativeSeparators(path);
     if (v->isReadOnly()) tip += "\nRead-only (Restricted Mode: the folder is not trusted)";
     tabs_->setTabToolTip(i, tip);
@@ -1419,11 +1444,15 @@ void MainWindow::applyTrust() {
     CodeView* v = currentView();
     const bool fileRo = v && v->isReadOnly();
     if (trustBar_) {
-        trustBar_->setVisible(r || fileRo);
-        const QString where = QDir::toNativeSeparators(trustTarget());
-        trustText_->setText("<b>Restricted Mode</b> — " + where.toHtmlEscaped() +
-                            " is not trusted, so its files are read-only and the terminal, Run (F5) and the compiler check are off. "
-                            "Trust it only if you trust its authors.");
+        const QString target = trustTarget();
+        if (!(r || fileRo)) trustBarClosedFor_.clear();     // trusted now: a later restriction shows the bar again
+        trustBar_->setVisible((r || fileRo) && target != trustBarClosedFor_);
+        const QString name = QFileInfo(target).fileName().isEmpty() ? QDir::toNativeSeparators(target) : QFileInfo(target).fileName();
+        const QString full = QString("\"%1\" is not trusted, so files are read-only and the terminal, Run (F5) and the compiler check are off.").arg(name);
+        // one line: the text is cut with "…" when the window is narrow; the tooltip has all of it and the full path
+        trustText_->setText(trustText_->fontMetrics().elidedText(full, Qt::ElideRight, std::max(80, trustText_->width())));
+        trustText_->setToolTip(full + "\n\n" + QDir::toNativeSeparators(target));
+        trustText_->setProperty("fullText", full);
     }
     if (restrictedBtn_) restrictedBtn_->setVisible(r || fileRo);
     if (trustAct_) trustAct_->setText((r || fileRo) ? "Trust This Folder…" : "Restrict This Folder");
@@ -1434,18 +1463,9 @@ void MainWindow::applyTrust() {
 bool MainWindow::askTrust(const QString& dir) {
     if (dir.isEmpty()) return false;
     if (Trust::isTrusted(dir)) { applyTrust(); return true; }
-    QMessageBox box(QMessageBox::Warning, "Trust This Folder?",
-                    "Do you trust the authors of the files in this folder?\n\n" + QDir::toNativeSeparators(dir), QMessageBox::NoButton, this);
-    box.setInformativeText("DevPad opens folders you have not trusted in Restricted Mode: files are read-only, and the terminal, "
-                           "Run (F5) and the compiler check are off, so no code from the folder can run.\n\n"
-                           "Trust the folder only if you know where its code comes from. Folders inside it are trusted too.");
-    QPushButton* yes = box.addButton("Yes, I Trust the Authors", QMessageBox::AcceptRole);
-    QPushButton* no = box.addButton("No, Stay in Restricted Mode", QMessageBox::RejectRole);
-    box.setDefaultButton(no);
-    box.setEscapeButton(no);
-    box.exec();
-    if (box.clickedButton() != yes) { applyTrust(); return false; }
-    return trustFolder(dir);
+    const QString chosen = TrustDialog::ask(this, dir);   // dir, its parent, or empty (stay restricted)
+    if (chosen.isEmpty()) { applyTrust(); return false; }
+    return trustFolder(chosen);
 }
 
 bool MainWindow::trustFolder(const QString& dir) {
@@ -1467,51 +1487,8 @@ void MainWindow::untrustFolder(const QString& dir) {
 }
 
 void MainWindow::manageTrustedFolders() {
-    QDialog d(this);
-    d.setWindowTitle("Trusted Folders");
-    d.resize(560, 340);
-    QVBoxLayout* lay = new QVBoxLayout(&d);
-    QLabel* info = new QLabel("Files in these folders (and the folders inside them) can be edited, and the terminal, "
-                              "Run (F5) and the compiler check work there. Every other folder opens in Restricted Mode.", &d);
-    info->setWordWrap(true);
-    lay->addWidget(info);
-    QListWidget* list = new QListWidget(&d);
-    list->setObjectName("trustedList");
-    list->setSelectionMode(QAbstractItemView::ExtendedSelection);
-    auto fill = [list]() {
-        list->clear();
-        for (const QString& f : Trust::trustedFolders()) {
-            QListWidgetItem* it = new QListWidgetItem(QDir::toNativeSeparators(f), list);
-            it->setData(Qt::UserRole, f);
-        }
-    };
-    fill();
-    lay->addWidget(list, 1);
-    QHBoxLayout* row = new QHBoxLayout();
-    QPushButton* addBtn = new QPushButton("Add Folder…", &d);
-    QPushButton* removeBtn = new QPushButton("Remove", &d);
-    QPushButton* closeBtn = new QPushButton("Close", &d);
-    row->addWidget(addBtn);
-    row->addWidget(removeBtn);
-    row->addStretch(1);
-    row->addWidget(closeBtn);
-    lay->addLayout(row);
-    removeBtn->setEnabled(false);
-    connect(list, &QListWidget::itemSelectionChanged, &d, [list, removeBtn]() { removeBtn->setEnabled(!list->selectedItems().isEmpty()); });
-    connect(addBtn, &QPushButton::clicked, &d, [this, &d, fill]() {
-        const QString dir = QFileDialog::getExistingDirectory(&d, "Trust Folder", root_);
-        if (dir.isEmpty()) return;
-        Trust::trustFolder(dir);
-        fill();
-    });
-    connect(removeBtn, &QPushButton::clicked, &d, [list, fill]() {
-        for (QListWidgetItem* it : list->selectedItems()) Trust::untrustFolder(it->data(Qt::UserRole).toString());
-        fill();
-    });
-    connect(closeBtn, &QPushButton::clicked, &d, &QDialog::accept);
-    enableDarkTitleBar(&d);
-    d.exec();
-    applyTrust();
+    TrustDialog::manage(this, root_);
+    applyTrust();                                          // the list may have changed: tabs, explorer, banner follow
     for (int i = 0; i < tabs_->count(); ++i) refreshTab(viewAt(i));
     scheduleCheck(100);
 }

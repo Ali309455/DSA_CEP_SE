@@ -1,6 +1,7 @@
 // Brackets.cpp - see Brackets.h.
 #include "Brackets.h"
 #include "Stack.h"
+#include "TextUtil.h"
 
 char bracketPartner(char c) {
     switch (c) {
@@ -33,10 +34,6 @@ std::string where(Pos p) {
     return std::to_string(p.line + 1) + ":" + std::to_string(p.col + 1);
 }
 
-bool wordChar(char c) {
-    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_';
-}
-bool digit(char c) { return c >= '0' && c <= '9'; }
 
 class Scanner {
 public:
@@ -191,7 +188,7 @@ private:
                 continue;
             }
             if (opt_.skipStrings && c == '\'') {
-                const bool separator = numberToken && i + 1 < s.size() && wordChar(s[i + 1]);
+                const bool separator = numberToken && i + 1 < s.size() && isWordChar(s[i + 1]);
                 if (!separator) {
                     size_t j = i + 1;
                     bool closed = false;
@@ -207,8 +204,8 @@ private:
                 ++i;
                 continue;
             }
-            if (wordChar(c)) {
-                if (i == 0 || !(wordChar(s[i - 1]) || (s[i - 1] == '\'' && numberToken))) numberToken = digit(c);
+            if (isWordChar(c)) {
+                if (i == 0 || !(isWordChar(s[i - 1]) || (s[i - 1] == '\'' && numberToken))) numberToken = isDigitChar(c);
                 ++i;
                 continue;
             }

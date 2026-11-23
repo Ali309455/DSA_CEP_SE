@@ -1,12 +1,8 @@
 #include "Search.h"
-#include <cctype>
+#include "TextUtil.h"
 #include <stdexcept>
 
 // ---------------------------------------------------------------- helpers
-
-static bool isWordChar(char c) {
-    return std::isalnum(static_cast<unsigned char>(c)) || c == '_';
-}
 
 static char fold(char c, bool matchCase) {
     if (!matchCase && c >= 'A' && c <= 'Z') return static_cast<char>(c - 'A' + 'a');

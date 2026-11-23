@@ -16,9 +16,8 @@
 #include "DynArray.h"
 #include "Editor.h"
 #include "Snippets.h"
+#include "TextUtil.h"
 #include "Trie.h"
-
-bool isWordChar(char c);
 
 // The word characters just before 'cursor' (may be empty). 'start' receives where
 // they begin. Throws std::out_of_range if the cursor is not a valid position.

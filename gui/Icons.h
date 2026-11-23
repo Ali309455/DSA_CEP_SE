@@ -21,7 +21,8 @@ enum Glyph {
     Close, ChevronRight, ChevronDown, ArrowUp, ArrowDown,
     CaseSensitive, WholeWord,
     Check, Warning, Folder, FolderOpen, File, OpenFile,
-    Terminal, Gear, Trash, Stop, Editor, Brush, Plus, Play      // terminal panel, settings window
+    Terminal, Gear, Trash, Stop, Editor, Brush, Plus, Play,     // terminal panel, settings window
+    Shield, Lock                                                // Restricted Mode (folder trust)
 };
 
 // A line icon in the colours of the current theme (Theme::IconNormal at rest, Theme::IconActive when hovered

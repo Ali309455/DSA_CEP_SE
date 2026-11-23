@@ -33,6 +33,10 @@ inline bool operator!=(const Pos& a, const Pos& b) { return !(a == b); }
 inline bool operator<(const Pos& a, const Pos& b) {
     return a.line < b.line || (a.line == b.line && a.col < b.col);
 }
+// Swap a and b if needed so that a comes first (a range given "backwards" works the same).
+inline void orderPos(Pos& a, Pos& b) {
+    if (b < a) { const Pos t = a; a = b; b = t; }
+}
 
 class Document {
 public:

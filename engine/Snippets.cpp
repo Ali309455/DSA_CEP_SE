@@ -1,18 +1,15 @@
 // Snippets.cpp - see Snippets.h.
 #include "Snippets.h"
+#include "TextUtil.h"
 #include <fstream>
 #include <cstdio>
 #include <stdexcept>
-
-static bool isTriggerChar(char c) {
-    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_';
-}
 
 bool SnippetTable::validTrigger(const std::string& t) {
     if (t.empty() || t.size() > kMaxTrigger) return false;
     if (t[0] >= '0' && t[0] <= '9') return false;
     for (size_t i = 0; i < t.size(); ++i)
-        if (!isTriggerChar(t[i])) return false;
+        if (!isWordChar(t[i])) return false;
     return true;
 }
 

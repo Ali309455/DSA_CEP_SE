@@ -398,277 +398,431 @@ static void checkCommand(const Document& doc) {
     else if (all.empty()) std::cout << "\n";
 }
 
-static bool execute(Editor& ed, Autocomplete& ac, SnippetTable& sn, const std::string& input) {
-    const Document& doc = ed.doc();
+// ---------------------------------------------------------------- commands
+//
+// Every command is one small function: it gets the session and the text after the command
+// word ('rest'), and returns false only to end the program (quit). Errors are thrown and
+// printed by main(). The table below maps command names to these functions.
+
+struct Session {
+    Editor ed;
+    Autocomplete ac;
+    SnippetTable snippets;
+    const Document& doc() const { return ed.doc(); }
+};
+
+using Handler = bool (*)(Session&, std::string& rest);
+
+static void throwBadLineRange(const Document& doc, size_t from, size_t to) {
+    throw std::out_of_range("Line range " + std::to_string(from) + "-" + std::to_string(to) +
+                            " is not valid (the document has " + std::to_string(doc.lineCount()) + " line(s)).");
+}
+
+// ---- files
+
+static bool cmdHelp(Session&, std::string&) { printHelp(); return true; }
+
+static bool cmdQuit(Session& s, std::string&) { return !okToDiscard(s.doc()); }
+
+static bool cmdNew(Session& s, std::string&) {
+    if (okToDiscard(s.doc())) { s.ed.newDocument(); std::cout << "New empty document.\n"; }
+    return true;
+}
+
+static bool cmdOpen(Session& s, std::string& rest) {
+    if (rest.empty()) throw std::invalid_argument("Usage: open <file>");
+    if (!okToDiscard(s.doc())) return true;
+    IOResult r = s.ed.open(pathForOpen(rest));
+    std::cout << r.message;
+    if (r.ok) std::cout << " (" << s.doc().lineCount() << " lines, " << s.doc().charCount() << " characters)";
+    std::cout << "\n";
+    return true;
+}
+
+static bool cmdSave(Session& s, std::string&) {
+    const std::string path = s.doc().path();
+    if (path.empty()) throw std::logic_error("This document has no filename yet. Use: saveas <file>");
+    IOResult r = s.ed.save(path);
+    if (r.ok) printSaved(path); else std::cout << r.message << "\n";
+    return true;
+}
+
+static bool cmdSaveAs(Session& s, std::string& rest) {
+    if (rest.empty()) throw std::invalid_argument("Usage: saveas <file>");
+    IOResult r = s.ed.save(pathForSave(rest));
+    if (r.ok) printSaved(s.doc().path()); else std::cout << r.message << "\n";
+    return true;
+}
+
+static bool cmdInfo(Session& s, std::string&) { info(s.doc()); return true; }
+
+static bool cmdShow(Session& s, std::string& rest) {
+    const Document& doc = s.doc();
+    DynArray<std::string> w;
+    const size_t got = takeWords(rest, 2, w, rest);
+    size_t from = 1, to = doc.lineCount();
+    if (got >= 1 && !parseNum(w[0], from)) throw std::invalid_argument("Usage: show [from [to]]");
+    if (got >= 2 && !parseNum(w[1], to)) throw std::invalid_argument("Usage: show [from [to]]");
+    if (got == 1) to = from;
+    if (from < 1 || to > doc.lineCount() || from > to) throwBadLineRange(doc, from, to);
+    show(doc, from - 1, to - 1);
+    return true;
+}
+
+// ---- editing
+
+static bool cmdAppend(Session& s, std::string& rest) {
+    if (s.doc().isEmpty()) s.ed.insertText(Pos{0, 0}, rest);
+    else s.ed.insertLineBefore(s.doc().lineCount(), rest);
+    std::cout << "Added at line " << s.doc().lineCount() << ".\n";
+    return true;
+}
+
+static bool cmdAddLine(Session& s, std::string& rest) {
+    DynArray<std::string> w;
+    size_t n[1];
+    takeWords(rest, 1, w, rest);
+    needNumbers(w, 1, n, "addline <line> <text>");
+    if (n[0] < 1 || n[0] > s.doc().lineCount() + 1)
+        throw std::out_of_range("Line " + std::to_string(n[0]) + " is not valid (use 1 to " +
+                                std::to_string(s.doc().lineCount() + 1) + ").");
+    s.ed.insertLineBefore(n[0] - 1, rest);
+    std::cout << "Inserted new line " << n[0] << ".\n";
+    return true;
+}
+
+static bool cmdIns(Session& s, std::string& rest) {
+    DynArray<std::string> w;
+    size_t n[2];
+    takeWords(rest, 2, w, rest);
+    needNumbers(w, 2, n, "ins <line> <col> <text>");
+    if (rest.empty()) throw std::invalid_argument("Nothing to insert. Usage: ins <line> <col> <text>");
+    s.ed.insertText(userPos(s.doc(), n[0], n[1]), rest);
+    std::cout << "Inserted " << rest.size() << " character(s) at " << n[0] << ":" << n[1] << ".\n";
+    return true;
+}
+
+static bool cmdNewLine(Session& s, std::string& rest) {
+    DynArray<std::string> w;
+    size_t n[2];
+    takeWords(rest, 2, w, rest);
+    needNumbers(w, 2, n, "nl <line> <col>");
+    s.ed.insertNewLine(userPos(s.doc(), n[0], n[1]));
+    std::cout << "Line split at " << n[0] << ":" << n[1] << ".\n";
+    return true;
+}
+
+static bool cmdDel(Session& s, std::string& rest) {
+    requireNotEmpty(s.doc());
+    DynArray<std::string> w;
+    size_t n[2];
+    const size_t got = takeWords(rest, 3, w, rest);
+    needNumbers(w, 2, n, "del <line> <col> [count]");
+    size_t count = 1;
+    if (got >= 3 && (!parseNum(w[2], count) || count == 0))
+        throw std::invalid_argument("Usage: del <line> <col> [count]   (count must be 1 or more)");
+    const std::string gone = s.ed.deleteChars(userPos(s.doc(), n[0], n[1]), count);
+    std::cout << "Deleted \"" << preview(gone) << "\".\n";
+    return true;
+}
+
+static bool cmdDelWord(Session& s, std::string& rest) {
+    requireNotEmpty(s.doc());
+    DynArray<std::string> w;
+    size_t n[2];
+    takeWords(rest, 2, w, rest);
+    needNumbers(w, 2, n, "delword <line> <col>");
+    const std::string gone = s.ed.deleteWord(userPos(s.doc(), n[0], n[1]));
+    std::cout << "Deleted word \"" << preview(gone) << "\".\n";
+    return true;
+}
+
+static bool cmdDelRange(Session& s, std::string& rest) {
+    requireNotEmpty(s.doc());
+    DynArray<std::string> w;
+    size_t n[4];
+    takeWords(rest, 4, w, rest);
+    needNumbers(w, 4, n, "delrange <l1> <c1> <l2> <c2>");
+    const std::string gone = s.ed.deleteRange(userPos(s.doc(), n[0], n[1]), userPos(s.doc(), n[2], n[3]));
+    std::cout << "Deleted " << gone.size() << " character(s): \"" << preview(gone) << "\".\n";
+    return true;
+}
+
+static bool cmdDelLines(Session& s, std::string& rest) {
+    requireNotEmpty(s.doc());
+    DynArray<std::string> w;
+    size_t n[1];
+    const size_t got = takeWords(rest, 2, w, rest);
+    needNumbers(w, 1, n, "dellines <from> [to]");
+    size_t from = n[0], to = from;
+    if (got >= 2 && !parseNum(w[1], to)) throw std::invalid_argument("Usage: dellines <from> [to]");
+    if (from < 1 || to < from || to > s.doc().lineCount()) throwBadLineRange(s.doc(), from, to);
+    s.ed.deleteLines(from - 1, to - 1);
+    std::cout << "Deleted line(s) " << from << (to > from ? "-" + std::to_string(to) : std::string()) << ".\n";
+    return true;
+}
+
+static bool cmdReplaceRange(Session& s, std::string& rest) {
+    requireNotEmpty(s.doc());
+    DynArray<std::string> w;
+    size_t n[4];
+    takeWords(rest, 4, w, rest);
+    needNumbers(w, 4, n, "replace <l1> <c1> <l2> <c2> <text>");
+    const Pos a = userPos(s.doc(), n[0], n[1]);
+    const Pos b = userPos(s.doc(), n[2], n[3]);
+    const std::string before = s.doc().getRange(a, b);
+    s.ed.replaceRange(a, b, rest);
+    std::cout << "Replaced \"" << preview(before) << "\" with \"" << preview(rest) << "\".\n";
+    return true;
+}
+
+// ---- search and replace
+
+static bool cmdFind(Session& s, std::string& rest) {
+    const Document& doc = s.doc();
+    requireNotEmpty(doc, "search");
+    SearchOptions opt;
+    size_t i = 0;
+    takeFlags(rest, i, opt);
+    std::string what;
+    while (i < rest.size() && isBlank(rest[i])) ++i;
+    if (i < rest.size() && rest[i] == '"') {                     // quoted: exact text, spaces kept
+        if (!takeArg(rest, i, what)) what.clear();
+        while (i < rest.size() && isBlank(rest[i])) ++i;
+        if (i < rest.size()) throw std::invalid_argument("Unexpected text after the closing quote.");
+    } else {
+        what = rest.substr(i);                                    // the whole rest of the line
+    }
+    if (what.empty()) throw std::invalid_argument("Usage: find [-i] [-w] <text>   (the search text is empty)");
+    DynArray<Match> hits = findAll(doc, what, opt);
+    if (hits.empty()) {
+        std::cout << "\"" << preview(what) << "\" was not found (" << describe(opt) << ").\n";
+        return true;
+    }
+    std::cout << "Found " << hits.size() << " occurrence(s) of \"" << preview(what) << "\" (" << describe(opt) << "):\n";
+    const size_t shown = hits.size() < 50 ? hits.size() : 50;
+    for (size_t k = 0; k < shown; ++k)
+        std::cout << "  " << (k + 1) << ")  " << (hits[k].start.line + 1) << ":" << (hits[k].start.col + 1)
+                  << "  | " << preview(doc.getLine(hits[k].start.line)) << "\n";
+    if (hits.size() > shown) std::cout << "  ... and " << (hits.size() - shown) << " more.\n";
+    return true;
+}
+
+// replaceall [-i] [-w] <old> <new>   and   replacenth [-i] [-w] <n> <old> <new>
+static bool replaceCommand(Session& s, std::string& rest, bool nth) {
+    const char* usage = nth ? "replacenth [-i] [-w] <n> <old> <new>" : "replaceall [-i] [-w] <old> <new>";
+    requireNotEmpty(s.doc(), "replace");
+    SearchOptions opt;
+    size_t i = 0;
+    takeFlags(rest, i, opt);
+    std::string a, b;
+    size_t which = 0;
+    if (nth) {
+        std::string num;
+        if (!takeArg(rest, i, num) || !parseNum(num, which) || which == 0)
+            throw std::invalid_argument(std::string("Usage: ") + usage + "   (n must be 1 or more)");
+    }
+    if (!takeArg(rest, i, a)) throw std::invalid_argument(std::string("Usage: ") + usage);
+    if (!takeArg(rest, i, b)) throw std::invalid_argument(std::string("Usage: ") + usage + "   (use \"\" for an empty replacement)");
+    while (i < rest.size() && isBlank(rest[i])) ++i;
+    if (i < rest.size())
+        throw std::invalid_argument(std::string("Too many arguments. Usage: ") + usage + "   (put text with spaces in \"quotes\")");
+    if (a.empty()) throw std::invalid_argument("The search text is empty.");
+    if (nth) {
+        const Match m = s.ed.replaceNth(a, b, which, opt);
+        std::cout << "Replaced occurrence " << which << " (at " << (m.start.line + 1) << ":" << (m.start.col + 1)
+                  << ") with \"" << preview(b) << "\".\n";
+        return true;
+    }
+    const ReplaceResult r = s.ed.replaceAll(a, b, opt);
+    if (r.found == 0) std::cout << "\"" << preview(a) << "\" was not found; nothing changed.\n";
+    else if (r.changed == 0) std::cout << "Found " << r.found << " occurrence(s), but they already equal the replacement; nothing changed.\n";
+    else std::cout << "Replaced " << r.changed << " occurrence(s) of \"" << preview(a) << "\" with \""
+                   << preview(b) << "\". One 'undo' reverses all of them.\n";
+    return true;
+}
+
+static bool cmdReplaceAll(Session& s, std::string& rest) { return replaceCommand(s, rest, false); }
+static bool cmdReplaceNth(Session& s, std::string& rest) { return replaceCommand(s, rest, true); }
+
+// ---- history
+
+static bool cmdUndo(Session& s, std::string&) {
+    std::string label;
+    if (s.ed.undo(&label)) std::cout << "Undid: " << label << ".\n";
+    else std::cout << "Nothing to undo.\n";
+    return true;
+}
+
+static bool cmdRedo(Session& s, std::string&) {
+    std::string label;
+    if (s.ed.redo(&label)) std::cout << "Redid: " << label << ".\n";
+    else std::cout << "Nothing to redo.\n";
+    return true;
+}
+
+static bool cmdHistory(Session& s, std::string&) {
+    const Editor& ed = s.ed;
+    std::cout << "Can undo " << ed.undoCount() << " step(s)";
+    if (ed.canUndo()) std::cout << " (next: " << ed.nextUndoLabel() << ")";
+    std::cout << "; can redo " << ed.redoCount() << " step(s)";
+    if (ed.canRedo()) std::cout << " (next: " << ed.nextRedoLabel() << ")";
+    std::cout << ". History keeps the latest " << ed.historyLimit() << " steps.\n";
+    return true;
+}
+
+// ---- code tools
+
+static bool cmdFormat(Session& s, std::string& rest) {
+    if (!rest.empty()) throw std::invalid_argument("Usage: format");
+    const size_t changed = formatDocument(s.ed);
+    if (changed == 0) std::cout << "Already formatted.\n";
+    else std::cout << "Formatted: " << changed << " line(s) changed. 'undo' restores the old layout.\n";
+    return true;
+}
+
+static bool cmdCheck(Session& s, std::string& rest) {
+    if (!rest.empty()) throw std::invalid_argument("Usage: check");
+    checkCommand(s.doc());
+    return true;
+}
+
+static bool cmdBrackets(Session& s, std::string&) {
+    const BracketReport r = checkBrackets(s.doc());
+    if (r.ok()) {
+        std::cout << "Brackets OK: " << r.pairs.size() << " pair(s), deepest nesting " << r.maxDepth << ".\n";
+        return true;
+    }
+    std::cout << r.issues.size() << " problem(s) found" << (r.truncated ? " (list cut short)" : "") << ":\n";
+    for (size_t k = 0; k < r.issues.size(); ++k) std::cout << "  " << r.issues[k].message << "\n";
+    return true;
+}
+
+static bool cmdMatch(Session& s, std::string& rest) {
+    const Document& doc = s.doc();
+    DynArray<std::string> w;
+    size_t n[2];
+    takeWords(rest, 2, w, rest);
+    needNumbers(w, 2, n, "match <line> <col>");
+    const Pos at = userPos(doc, n[0], n[1]);
+    const BracketReport r = checkBrackets(doc);
+    Pos b, o;
+    if (matchNearCursor(doc, r, at, b, o))
+        std::cout << "'" << doc.getLine(b.line)[b.col] << "' at " << (b.line + 1) << ":" << (b.col + 1)
+                  << " pairs with '" << doc.getLine(o.line)[o.col] << "' at " << (o.line + 1) << ":" << (o.col + 1) << ".\n";
+    else
+        std::cout << "No matched bracket at or just before " << n[0] << ":" << n[1] << ".\n";
+    return true;
+}
+
+// ---- autocomplete and snippets
+
+static bool cmdComplete(Session& s, std::string& rest) {
+    const Document& doc = s.doc();
+    DynArray<std::string> w;
+    size_t n[2];
+    const size_t got = takeWords(rest, 3, w, rest);
+    s.ac.refresh(doc);
+    std::string pre;
+    if (got == 2 && parseNum(w[0], n[0]) && parseNum(w[1], n[1])) pre = prefixBefore(doc, userPos(doc, n[0], n[1]));
+    else if (got == 1 && rest.empty()) pre = w[0];
+    else throw std::invalid_argument("Usage: complete <prefix>   or   complete <line> <col>");
+    const DynArray<std::string> sug = s.ac.suggest(pre, 8);
+    if (pre.empty()) throw std::invalid_argument("There is no word before that position to complete.");
+    if (!Trie::validWord(pre)) throw std::invalid_argument("'" + pre + "' cannot be completed (too long or has blanks).");
+    if (sug.empty()) {
+        std::cout << "No suggestions for \"" << pre << "\".\n";
+        return true;
+    }
+    std::cout << "Suggestions for \"" << pre << "\":\n";
+    for (size_t k = 0; k < sug.size(); ++k) std::cout << "  " << (k + 1) << ") " << sug[k] << "\n";
+    return true;
+}
+
+static bool cmdAccept(Session& s, std::string& rest) {
+    DynArray<std::string> w;
+    size_t n[2];
+    takeWords(rest, 2, w, rest);
+    needNumbers(w, 2, n, "accept <line> <col> <word>");
+    if (rest.empty()) throw std::invalid_argument("Usage: accept <line> <col> <word>");
+    const Pos end = applyCompletion(s.ed, userPos(s.doc(), n[0], n[1]), rest);
+    s.ac.accepted(rest);
+    std::cout << "Completed to \"" << rest << "\"; cursor now at " << (end.line + 1) << ":" << (end.col + 1) << ".\n";
+    return true;
+}
+
+static bool cmdDictAdd(Session& s, std::string& rest) {
+    if (!s.ac.addWord(rest))
+        throw std::invalid_argument("'" + preview(rest) + "' is not a valid word (1-" + std::to_string(Trie::kMaxWordLength) + " characters, no blanks).");
+    std::cout << "Added \"" << rest << "\" to the dictionary (" << s.ac.dictionarySize() << " words).\n";
+    return true;
+}
+
+static bool cmdDictDel(Session& s, std::string& rest) {
+    if (!s.ac.removeWord(rest)) throw std::invalid_argument("\"" + preview(rest) + "\" is not in the dictionary.");
+    std::cout << "Removed \"" << rest << "\" (" << s.ac.dictionarySize() << " words left).\n";
+    return true;
+}
+
+static bool cmdExpand(Session& s, std::string& rest) {
+    DynArray<std::string> w;
+    size_t n[2];
+    const size_t got = takeWords(rest, 2, w, rest);
+    if (got < 2 || !rest.empty()) throw std::invalid_argument("Usage: expand <line> <col>");
+    needNumbers(w, 2, n, "expand <line> <col>");
+    const SnippetExpansion r = applySnippet(s.ed, s.snippets, userPos(s.doc(), n[0], n[1]));
+    if (!r.expanded) std::cout << r.reason << "\n";
+    else std::cout << "Expanded \"" << r.trigger << "\"; cursor now at " << (r.cursor.line + 1) << ":" << (r.cursor.col + 1) << ".\n";
+    return true;
+}
+
+static bool cmdSnippet(Session& s, std::string& rest) { snippetCommand(s.snippets, rest); return true; }
+
+// ---------------------------------------------------------------- the command table
+
+struct ConsoleCommand {
+    const char* name;
+    Handler run;
+};
+
+static const ConsoleCommand kCommands[] = {
+    {"help", cmdHelp},         {"?", cmdHelp},
+    {"quit", cmdQuit},         {"exit", cmdQuit},
+    {"new", cmdNew},           {"open", cmdOpen},           {"save", cmdSave},         {"saveas", cmdSaveAs},
+    {"info", cmdInfo},         {"show", cmdShow},
+    {"append", cmdAppend},     {"addline", cmdAddLine},     {"ins", cmdIns},           {"nl", cmdNewLine},
+    {"del", cmdDel},           {"delword", cmdDelWord},     {"delrange", cmdDelRange}, {"dellines", cmdDelLines},
+    {"replace", cmdReplaceRange},
+    {"find", cmdFind},         {"replaceall", cmdReplaceAll}, {"replacenth", cmdReplaceNth},
+    {"undo", cmdUndo},         {"redo", cmdRedo},           {"history", cmdHistory},
+    {"format", cmdFormat},     {"check", cmdCheck},         {"problems", cmdCheck},
+    {"brackets", cmdBrackets}, {"match", cmdMatch},
+    {"complete", cmdComplete}, {"accept", cmdAccept},       {"dictadd", cmdDictAdd},   {"dictdel", cmdDictDel},
+    {"expand", cmdExpand},     {"snippet", cmdSnippet},     {"snippets", cmdSnippet},
+};
+
+// Runs one input line. Returns false when the program should end.
+static bool execute(Session& s, const std::string& input) {
     DynArray<std::string> w;
     std::string rest;
-    if (takeWords(input, 1, w, rest) == 0) return true;
-    std::string cmd = toLower(w[0]);
-    size_t n[4];
-
-    if (cmd == "help" || cmd == "?") {
-        printHelp();
-    } else if (cmd == "quit" || cmd == "exit") {
-        if (okToDiscard(doc)) return false;
-    } else if (cmd == "new") {
-        if (okToDiscard(doc)) { ed.newDocument(); std::cout << "New empty document.\n"; }
-    } else if (cmd == "open") {
-        if (rest.empty()) throw std::invalid_argument("Usage: open <file>");
-        if (!okToDiscard(doc)) return true;
-        IOResult r = ed.open(pathForOpen(rest));
-        std::cout << r.message;
-        if (r.ok) std::cout << " (" << doc.lineCount() << " lines, " << doc.charCount() << " characters)";
-        std::cout << "\n";
-    } else if (cmd == "save") {
-        if (doc.path().empty()) throw std::logic_error("This document has no filename yet. Use: saveas <file>");
-        IOResult r = ed.save(doc.path());
-        if (r.ok) printSaved(doc.path()); else std::cout << r.message << "\n";
-    } else if (cmd == "saveas") {
-        if (rest.empty()) throw std::invalid_argument("Usage: saveas <file>");
-        IOResult r = ed.save(pathForSave(rest));
-        if (r.ok) printSaved(doc.path()); else std::cout << r.message << "\n";
-    } else if (cmd == "info") {
-        info(doc);
-    } else if (cmd == "show") {
-        size_t got = takeWords(rest, 2, w, rest);
-        size_t from = 1, to = doc.lineCount();
-        if (got >= 1 && !parseNum(w[0], from)) throw std::invalid_argument("Usage: show [from [to]]");
-        if (got >= 2 && !parseNum(w[1], to)) throw std::invalid_argument("Usage: show [from [to]]");
-        if (got == 1) to = from;
-        if (from < 1 || to > doc.lineCount() || from > to)
-            throw std::out_of_range("Line range " + std::to_string(from) + "-" + std::to_string(to) +
-                                    " is not valid (the document has " + std::to_string(doc.lineCount()) + " line(s)).");
-        show(doc, from - 1, to - 1);
-    } else if (cmd == "append") {
-        if (doc.isEmpty()) ed.insertText(Pos{0, 0}, rest);
-        else ed.insertLineBefore(doc.lineCount(), rest);
-        std::cout << "Added at line " << doc.lineCount() << ".\n";
-    } else if (cmd == "addline") {
-        takeWords(rest, 1, w, rest);
-        needNumbers(w, 1, n, "addline <line> <text>");
-        if (n[0] < 1 || n[0] > doc.lineCount() + 1)
-            throw std::out_of_range("Line " + std::to_string(n[0]) + " is not valid (use 1 to " +
-                                    std::to_string(doc.lineCount() + 1) + ").");
-        ed.insertLineBefore(n[0] - 1, rest);
-        std::cout << "Inserted new line " << n[0] << ".\n";
-    } else if (cmd == "ins") {
-        takeWords(rest, 2, w, rest);
-        needNumbers(w, 2, n, "ins <line> <col> <text>");
-        if (rest.empty()) throw std::invalid_argument("Nothing to insert. Usage: ins <line> <col> <text>");
-        Pos p = userPos(doc, n[0], n[1]);
-        ed.insertText(p, rest);
-        std::cout << "Inserted " << rest.size() << " character(s) at " << n[0] << ":" << n[1] << ".\n";
-    } else if (cmd == "nl") {
-        takeWords(rest, 2, w, rest);
-        needNumbers(w, 2, n, "nl <line> <col>");
-        ed.insertNewLine(userPos(doc, n[0], n[1]));
-        std::cout << "Line split at " << n[0] << ":" << n[1] << ".\n";
-    } else if (cmd == "del") {
-        requireNotEmpty(doc);
-        size_t got = takeWords(rest, 3, w, rest);
-        needNumbers(w, 2, n, "del <line> <col> [count]");
-        size_t count = 1;
-        if (got >= 3 && (!parseNum(w[2], count) || count == 0))
-            throw std::invalid_argument("Usage: del <line> <col> [count]   (count must be 1 or more)");
-        std::string gone = ed.deleteChars(userPos(doc, n[0], n[1]), count);
-        std::cout << "Deleted \"" << preview(gone) << "\".\n";
-    } else if (cmd == "delword") {
-        requireNotEmpty(doc);
-        takeWords(rest, 2, w, rest);
-        needNumbers(w, 2, n, "delword <line> <col>");
-        std::string gone = ed.deleteWord(userPos(doc, n[0], n[1]));
-        std::cout << "Deleted word \"" << preview(gone) << "\".\n";
-    } else if (cmd == "delrange") {
-        requireNotEmpty(doc);
-        takeWords(rest, 4, w, rest);
-        needNumbers(w, 4, n, "delrange <l1> <c1> <l2> <c2>");
-        std::string gone = ed.deleteRange(userPos(doc, n[0], n[1]), userPos(doc, n[2], n[3]));
-        std::cout << "Deleted " << gone.size() << " character(s): \"" << preview(gone) << "\".\n";
-    } else if (cmd == "dellines") {
-        requireNotEmpty(doc);
-        size_t got = takeWords(rest, 2, w, rest);
-        needNumbers(w, 1, n, "dellines <from> [to]");
-        size_t from = n[0], to = from;
-        if (got >= 2 && !parseNum(w[1], to)) throw std::invalid_argument("Usage: dellines <from> [to]");
-        if (from < 1 || to < from || to > doc.lineCount())
-            throw std::out_of_range("Line range " + std::to_string(from) + "-" + std::to_string(to) +
-                                    " is not valid (the document has " + std::to_string(doc.lineCount()) + " line(s)).");
-        ed.deleteLines(from - 1, to - 1);
-        std::cout << "Deleted line(s) " << from << (to > from ? "-" + std::to_string(to) : std::string()) << ".\n";
-    } else if (cmd == "replace") {
-        requireNotEmpty(doc);
-        takeWords(rest, 4, w, rest);
-        needNumbers(w, 4, n, "replace <l1> <c1> <l2> <c2> <text>");
-        Pos a = userPos(doc, n[0], n[1]);
-        Pos b = userPos(doc, n[2], n[3]);
-        std::string before = doc.getRange(a, b);
-        ed.replaceRange(a, b, rest);
-        std::cout << "Replaced \"" << preview(before) << "\" with \"" << preview(rest) << "\".\n";
-    } else if (cmd == "find") {
-        requireNotEmpty(doc, "search");
-        SearchOptions opt;
-        size_t i = 0;
-        takeFlags(rest, i, opt);
-        std::string what;
-        while (i < rest.size() && isBlank(rest[i])) ++i;
-        if (i < rest.size() && rest[i] == '"') {                 // quoted: exact text, spaces kept
-            if (!takeArg(rest, i, what)) what.clear();
-            while (i < rest.size() && isBlank(rest[i])) ++i;
-            if (i < rest.size()) throw std::invalid_argument("Unexpected text after the closing quote.");
-        } else {
-            what = rest.substr(i);                                // the whole rest of the line
-        }
-        if (what.empty()) throw std::invalid_argument("Usage: find [-i] [-w] <text>   (the search text is empty)");
-        DynArray<Match> hits = findAll(doc, what, opt);
-        if (hits.empty()) {
-            std::cout << "\"" << preview(what) << "\" was not found (" << describe(opt) << ").\n";
-        } else {
-            std::cout << "Found " << hits.size() << " occurrence(s) of \"" << preview(what) << "\" ("
-                      << describe(opt) << "):\n";
-            const size_t shown = hits.size() < 50 ? hits.size() : 50;
-            for (size_t k = 0; k < shown; ++k) {
-                std::cout << "  " << (k + 1) << ")  " << (hits[k].start.line + 1) << ":" << (hits[k].start.col + 1)
-                          << "  | " << preview(doc.getLine(hits[k].start.line)) << "\n";
-            }
-            if (hits.size() > shown) std::cout << "  ... and " << (hits.size() - shown) << " more.\n";
-        }
-    } else if (cmd == "replaceall" || cmd == "replacenth") {
-        const bool nth = (cmd == "replacenth");
-        const char* usage = nth ? "replacenth [-i] [-w] <n> <old> <new>" : "replaceall [-i] [-w] <old> <new>";
-        requireNotEmpty(doc, "replace");
-        SearchOptions opt;
-        size_t i = 0;
-        takeFlags(rest, i, opt);
-        std::string a, b;
-        size_t which = 0;
-        if (nth) {
-            std::string num;
-            if (!takeArg(rest, i, num) || !parseNum(num, which) || which == 0)
-                throw std::invalid_argument(std::string("Usage: ") + usage + "   (n must be 1 or more)");
-        }
-        if (!takeArg(rest, i, a)) throw std::invalid_argument(std::string("Usage: ") + usage);
-        if (!takeArg(rest, i, b)) throw std::invalid_argument(std::string("Usage: ") + usage +
-                                                              "   (use \"\" for an empty replacement)");
-        while (i < rest.size() && isBlank(rest[i])) ++i;
-        if (i < rest.size()) throw std::invalid_argument(std::string("Too many arguments. Usage: ") + usage +
-                                                         "   (put text with spaces in \"quotes\")");
-        if (a.empty()) throw std::invalid_argument("The search text is empty.");
-        if (nth) {
-            Match m = ed.replaceNth(a, b, which, opt);
-            std::cout << "Replaced occurrence " << which << " (at " << (m.start.line + 1) << ":" << (m.start.col + 1)
-                      << ") with \"" << preview(b) << "\".\n";
-        } else {
-            ReplaceResult r = ed.replaceAll(a, b, opt);
-            if (r.found == 0) std::cout << "\"" << preview(a) << "\" was not found; nothing changed.\n";
-            else if (r.changed == 0) std::cout << "Found " << r.found << " occurrence(s), but they already equal the replacement; nothing changed.\n";
-            else std::cout << "Replaced " << r.changed << " occurrence(s) of \"" << preview(a) << "\" with \""
-                           << preview(b) << "\". One 'undo' reverses all of them.\n";
-        }
-    } else if (cmd == "undo") {
-        std::string label;
-        if (ed.undo(&label)) std::cout << "Undid: " << label << ".\n";
-        else std::cout << "Nothing to undo.\n";
-    } else if (cmd == "redo") {
-        std::string label;
-        if (ed.redo(&label)) std::cout << "Redid: " << label << ".\n";
-        else std::cout << "Nothing to redo.\n";
-    } else if (cmd == "history") {
-        std::cout << "Can undo " << ed.undoCount() << " step(s)";
-        if (ed.canUndo()) std::cout << " (next: " << ed.nextUndoLabel() << ")";
-        std::cout << "; can redo " << ed.redoCount() << " step(s)";
-        if (ed.canRedo()) std::cout << " (next: " << ed.nextRedoLabel() << ")";
-        std::cout << ". History keeps the latest " << ed.historyLimit() << " steps.\n";
-    } else if (cmd == "format") {
-        if (!rest.empty()) throw std::invalid_argument("Usage: format");
-        const size_t changed = formatDocument(ed);
-        if (changed == 0) std::cout << "Already formatted.\n";
-        else std::cout << "Formatted: " << changed << " line(s) changed. 'undo' restores the old layout.\n";
-    } else if (cmd == "check" || cmd == "problems") {
-        if (!rest.empty()) throw std::invalid_argument("Usage: check");
-        checkCommand(doc);
-    } else if (cmd == "brackets") {
-        BracketReport r = checkBrackets(doc);
-        if (r.ok()) {
-            std::cout << "Brackets OK: " << r.pairs.size() << " pair(s), deepest nesting " << r.maxDepth << ".\n";
-        } else {
-            std::cout << r.issues.size() << " problem(s) found" << (r.truncated ? " (list cut short)" : "") << ":\n";
-            for (size_t k = 0; k < r.issues.size(); ++k) std::cout << "  " << r.issues[k].message << "\n";
-        }
-    } else if (cmd == "match") {
-        takeWords(rest, 2, w, rest);
-        needNumbers(w, 2, n, "match <line> <col>");
-        Pos at = userPos(doc, n[0], n[1]);
-        BracketReport r = checkBrackets(doc);
-        Pos b, o;
-        if (matchNearCursor(doc, r, at, b, o))
-            std::cout << "'" << doc.getLine(b.line)[b.col] << "' at " << (b.line + 1) << ":" << (b.col + 1)
-                      << " pairs with '" << doc.getLine(o.line)[o.col] << "' at " << (o.line + 1) << ":" << (o.col + 1) << ".\n";
-        else
-            std::cout << "No matched bracket at or just before " << n[0] << ":" << n[1] << ".\n";
-    } else if (cmd == "complete") {
-        size_t got = takeWords(rest, 3, w, rest);
-        ac.refresh(doc);
-        DynArray<std::string> sug;
-        std::string pre;
-        if (got == 2 && parseNum(w[0], n[0]) && parseNum(w[1], n[1])) {
-            Pos at = userPos(doc, n[0], n[1]);
-            pre = prefixBefore(doc, at);
-            sug = ac.suggest(pre, 8);
-        } else if (got == 1 && rest.empty()) {
-            pre = w[0];
-            sug = ac.suggest(pre, 8);
-        } else {
-            throw std::invalid_argument("Usage: complete <prefix>   or   complete <line> <col>");
-        }
-        if (pre.empty()) throw std::invalid_argument("There is no word before that position to complete.");
-        if (!Trie::validWord(pre)) throw std::invalid_argument("'" + pre + "' cannot be completed (too long or has blanks).");
-        if (sug.empty()) std::cout << "No suggestions for \"" << pre << "\".\n";
-        else {
-            std::cout << "Suggestions for \"" << pre << "\":\n";
-            for (size_t k = 0; k < sug.size(); ++k) std::cout << "  " << (k + 1) << ") " << sug[k] << "\n";
-        }
-    } else if (cmd == "accept") {
-        takeWords(rest, 2, w, rest);
-        needNumbers(w, 2, n, "accept <line> <col> <word>");
-        if (rest.empty()) throw std::invalid_argument("Usage: accept <line> <col> <word>");
-        Pos at = userPos(doc, n[0], n[1]);
-        Pos end = applyCompletion(ed, at, rest);
-        ac.accepted(rest);
-        std::cout << "Completed to \"" << rest << "\"; cursor now at " << (end.line + 1) << ":" << (end.col + 1) << ".\n";
-    } else if (cmd == "dictadd") {
-        if (!ac.addWord(rest)) throw std::invalid_argument("'" + preview(rest) + "' is not a valid word (1-" + std::to_string(Trie::kMaxWordLength) + " characters, no blanks).");
-        std::cout << "Added \"" << rest << "\" to the dictionary (" << ac.dictionarySize() << " words).\n";
-    } else if (cmd == "dictdel") {
-        if (!ac.removeWord(rest)) throw std::invalid_argument("\"" + preview(rest) + "\" is not in the dictionary.");
-        std::cout << "Removed \"" << rest << "\" (" << ac.dictionarySize() << " words left).\n";
-    } else if (cmd == "expand") {
-        size_t got = takeWords(rest, 2, w, rest);
-        if (got < 2 || !rest.empty()) throw std::invalid_argument("Usage: expand <line> <col>");
-        needNumbers(w, 2, n, "expand <line> <col>");
-        Pos at = userPos(doc, n[0], n[1]);
-        SnippetExpansion r = applySnippet(ed, sn, at);
-        if (!r.expanded) std::cout << r.reason << "\n";
-        else std::cout << "Expanded \"" << r.trigger << "\"; cursor now at " << (r.cursor.line + 1) << ":" << (r.cursor.col + 1) << ".\n";
-    } else if (cmd == "snippet" || cmd == "snippets") {
-        snippetCommand(sn, rest);
-    } else {
-        std::cout << "Unknown command '" << cmd << "'. Type 'help' for the list.\n";
-    }
+    if (takeWords(input, 1, w, rest) == 0) return true;      // empty line
+    const std::string cmd = toLower(w[0]);
+    for (const ConsoleCommand& c : kCommands)
+        if (cmd == c.name) return c.run(s, rest);
+    std::cout << "Unknown command '" << cmd << "'. Type 'help' for the list.\n";
     return true;
 }
 
 int main() {
-    Editor ed;
-    Autocomplete ac;
-    SnippetTable snippets;
-    snippets.loadDefaults();
+    Session s;
+    s.snippets.loadDefaults();
     std::cout << "Text Editor (console)  -  type 'help' for commands.\n";
     std::string input;
     while (true) {
-        std::cout << (ed.doc().modified() ? "*" : "") << "> " << std::flush;
+        std::cout << (s.doc().modified() ? "*" : "") << "> " << std::flush;
         if (!std::getline(std::cin, input)) break;  // end of input
         try {
-            if (!execute(ed, ac, snippets, input)) break;
+            if (!execute(s, input)) break;
         } catch (const std::exception& e) {
             std::cout << "Error: " << e.what() << "\n";
         }
