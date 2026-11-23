@@ -23,6 +23,7 @@ add_library(engine STATIC
   engine/Editor.cpp
   engine/FileIO.cpp
   engine/Folding.cpp
+  engine/Formatter.cpp
   engine/Outline.cpp
   engine/Search.cpp
   engine/Snippets.cpp
@@ -33,6 +34,8 @@ target_include_directories(engine PUBLIC engine)
 # ---- Console test suite (use its output as evidence in the report) ----
 add_executable(engine_tests tests/test_main.cpp)
 target_link_libraries(engine_tests PRIVATE engine)
+# the formatter tests also format the project's own source files
+target_compile_definitions(engine_tests PRIVATE DEVPAD_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
 
 # ---- Console editor ----
 add_executable(console_editor app/console_main.cpp)
@@ -72,7 +75,7 @@ if(BUILD_GUI)
       gui/Theme.h
       gui/WinTheme.cpp
       gui/WinTheme.h
-      gui/Runner.cpp gui/Runner.h gui/Settings.cpp
+      gui/Runner.cpp gui/Runner.h gui/Trust.cpp gui/Trust.h gui/Settings.cpp
       gui/Settings.h
       gui/Controls.cpp
       gui/Controls.h
@@ -129,7 +132,7 @@ if(BUILD_GUI)
     if(Qt${QT_VERSION_MAJOR}Test_FOUND)
       add_executable(gui_tests tests/gui_test.cpp gui/MainWindow.cpp gui/MainWindow.h gui/CodeView.cpp gui/CodeView.h gui/FileExplorer.cpp gui/FileExplorer.h gui/WelcomePage.cpp gui/WelcomePage.h
                              gui/Icons.cpp gui/Icons.h gui/Theme.cpp gui/Theme.h gui/WinTheme.cpp gui/WinTheme.h
-                             gui/Runner.cpp gui/Runner.h gui/Settings.cpp gui/Settings.h gui/Controls.cpp gui/Controls.h gui/SettingsDialog.cpp gui/SettingsDialog.h gui/ShortcutsDialog.cpp gui/ShortcutsDialog.h gui/TerminalPanel.cpp gui/TerminalPanel.h
+                             gui/Runner.cpp gui/Runner.h gui/Trust.cpp gui/Trust.h gui/Settings.cpp gui/Settings.h gui/Controls.cpp gui/Controls.h gui/SettingsDialog.cpp gui/SettingsDialog.h gui/ShortcutsDialog.cpp gui/ShortcutsDialog.h gui/TerminalPanel.cpp gui/TerminalPanel.h
                              gui/ProblemsPanel.cpp gui/ProblemsPanel.h gui/SyntaxChecker.cpp gui/SyntaxChecker.h
                              gui/SnippetStore.cpp gui/SnippetStore.h gui/SnippetDialog.cpp gui/SnippetDialog.h
                              gui/SidePanels.cpp gui/SidePanels.h gui/Breadcrumbs.cpp gui/Breadcrumbs.h)

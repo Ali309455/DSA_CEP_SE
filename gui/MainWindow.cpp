@@ -58,6 +58,7 @@
 #include "SidePanels.h"
 #include "SyntaxChecker.h"
 #include "Runner.h"
+#include "Trust.h"
 #include <QStandardPaths>
 #include "FileIO.h"
 #include "Workspace.h"
@@ -109,6 +110,29 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     QVBoxLayout* lay = new QVBoxLayout(editorArea_);
     lay->setContentsMargins(0, 0, 0, 0);
     lay->setSpacing(0);
+    {
+        trustBar_ = new QFrame(editorArea_);
+        trustBar_->setObjectName("trustBar");
+        QHBoxLayout* tl = new QHBoxLayout(trustBar_);
+        tl->setContentsMargins(12, 5, 8, 5);
+        tl->setSpacing(8);
+        trustText_ = new QLabel(trustBar_);
+        trustText_->setObjectName("trustText");
+        trustText_->setWordWrap(true);
+        QPushButton* trustBtn = new QPushButton("Trust Folder", trustBar_);
+        trustBtn->setObjectName("trustButton");
+        trustBtn->setCursor(Qt::PointingHandCursor);
+        trustBtn->setToolTip("Allow editing, the terminal, Run (F5) and the compiler check for this folder");
+        connect(trustBtn, &QPushButton::clicked, this, [this]() { askTrust(trustTarget()); });
+        QPushButton* manageBtn = new QPushButton("Manage…", trustBar_);
+        manageBtn->setCursor(Qt::PointingHandCursor);
+        connect(manageBtn, &QPushButton::clicked, this, [this]() { manageTrustedFolders(); });
+        tl->addWidget(trustText_, 1);
+        tl->addWidget(trustBtn);
+        tl->addWidget(manageBtn);
+        trustBar_->hide();
+    }
+    lay->addWidget(trustBar_);
     lay->addWidget(tabs_, 1);
     lay->addWidget(findBar_);
 
@@ -124,9 +148,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     connect(welcome_, &WelcomePage::recentFileRequested, this, [this](const QString& p) { openPath(p); });
     connect(welcome_, &WelcomePage::recentFolderRequested, this, [this](const QString& p) {
         if (!QFileInfo(p).isDir()) { updateCentral(); return; }
-        setWorkspaceRoot(p);
-        addRecentFolder(p);
-        dock_->show();
+        openFolder(p);
     });
     centralStack_ = new QStackedWidget(this);
     centralStack_->addWidget(welcome_);
@@ -241,9 +263,11 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
         runPoll_->setInterval(200);
         connect(runPoll_, &QTimer::timeout, this, [this]() {
             const bool busy = terminal_ && terminal_->busy();
-            if (stopBtn_->isEnabled() != busy || runBtn_->isEnabled() == busy) {
+            const bool canRun = !busy && !runBlocked();
+            if (stopBtn_->isEnabled() != busy || runBtn_->isEnabled() != canRun) {
                 stopBtn_->setEnabled(busy);
-                runBtn_->setEnabled(!busy);
+                runBtn_->setEnabled(canRun);
+                runBtn_->setToolTip(runBlocked() ? QString("Run is off in Restricted Mode (the folder is not trusted)") : QString("Run File (F5)"));
                 refreshRunButtons();
             }
         });
@@ -264,6 +288,15 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
         if (v && v->firstBracketIssuePos(p)) v->setCursor(p);
         showProblems(true);
     });
+    restrictedBtn_ = new QPushButton("Restricted Mode");
+    restrictedBtn_->setObjectName("restrictedButton");
+    restrictedBtn_->setFlat(true);
+    restrictedBtn_->setCursor(Qt::PointingHandCursor);
+    restrictedBtn_->setFocusPolicy(Qt::NoFocus);
+    restrictedBtn_->setToolTip("This folder is not trusted: files are read-only and nothing runs. Click to trust it.");
+    connect(restrictedBtn_, &QPushButton::clicked, this, [this]() { askTrust(trustTarget()); });
+    restrictedBtn_->hide();
+    statusBar()->addPermanentWidget(restrictedBtn_);
     statusBar()->addPermanentWidget(issueBtn_);
     statusBar()->addPermanentWidget(posLabel_);
     statusBar()->addPermanentWidget(langLabel_);
@@ -309,7 +342,7 @@ int MainWindow::autoSaveNow() {
     for (int i = 0; i < tabs_->count(); ++i) {
         CodeView* v = viewAt(i);
         const QString path = QString::fromStdString(v->editor().doc().path());
-        if (path.isEmpty() || !v->editor().doc().modified()) continue;
+        if (path.isEmpty() || !v->editor().doc().modified() || v->isReadOnly()) continue;
         QString err;
         if (v->saveFile(path, &err)) { ++saved; refreshTab(v); }
         else failed = QFileInfo(path).fileName() + ": " + err;
@@ -371,6 +404,14 @@ void MainWindow::onThemeChanged() {
                                   .arg(Theme::schemeName(id), Theme::schemeName(Theme::toggledScheme(id))));
     }
     refreshRunButtons();
+    if (trustBar_) {
+        const QString warn = Theme::Warning.name();
+        trustBar_->setStyleSheet(QString("#trustBar { background: %1; border-bottom: 1px solid %2; }"
+                                         "#trustText { color: %3; }")
+                                     .arg(Theme::Raised.name(), warn, Theme::Text.name()));
+        restrictedBtn_->setStyleSheet(QString("#restrictedButton { color: %1; font-weight: bold; }").arg(warn));
+        restrictedBtn_->setIcon(Icons::get(Icons::Warning, Theme::Warning, Theme::Warning));
+    }
     if (issueBtn_) {
         const bool clean = issueBtn_->text() == QLatin1String("No problems");
         issueBtn_->setIcon(clean ? Icons::get(Icons::Check, Theme::Success, Theme::Success)
@@ -401,6 +442,7 @@ ShortcutsDialog* MainWindow::showShortcuts() {
 bool MainWindow::runCurrent() {
     CodeView* v = currentView();
     if (!v) { statusBar()->showMessage("Open a file to run it", 4000); return false; }
+    if (runBlocked()) { refuse("Run is off"); return false; }
     if (!saveView(v, false)) return false;
     const QString path = QString::fromStdString(v->editor().doc().path());
     const QString outDir = QDir(QStandardPaths::writableLocation(QStandardPaths::TempLocation)).filePath("devpad-run");
@@ -499,6 +541,7 @@ void MainWindow::syncBottomActions() {
 }
 
 void MainWindow::showTerminal(bool show) {
+    if (show && restricted()) { refuse("The terminal is off"); return; }
     if (show) {
         if (!terminalVisible()) showBottom(terminal_);
         terminal_->focusInput();
@@ -524,6 +567,7 @@ void MainWindow::scheduleCheck(int delayMs) {
     if (!v) return;
     const std::string path = v->editor().doc().path();
     if (path.empty() || !isCompilableSource(path)) return;      // brackets are still checked live
+    if (runBlocked()) return;                                   // Restricted Mode: the compiler never sees the file
     checkTimer_->start(delayMs);
 }
 
@@ -534,6 +578,10 @@ void MainWindow::checkNow() {
     if (path.empty() || !isCompilableSource(path)) {
         problems_->setStatus(path.empty() ? "Save the file as .cpp or .c to check it with the compiler (brackets are checked already)."
                                           : "The compiler check is for C / C++ files (brackets are checked already).");
+        return;
+    }
+    if (runBlocked()) {
+        problems_->setStatus("Restricted Mode: the compiler check is off because this folder is not trusted (brackets are checked already).");
         return;
     }
     checkView_ = v;
@@ -695,6 +743,11 @@ void MainWindow::buildActions() {
     add(file, "New File", {QKeySequence::New}, [this]() { newTab(); });
     add(file, "Open File…", {QKeySequence::Open}, [this]() { openDialog(); });
     add(file, "Open Folder…", seq("Ctrl+Shift+O"), [this]() { openFolderDialog(); });
+    trustAct_ = add(file, "Trust This Folder…", {}, [this]() {
+        if (restricted() || (currentView() && currentView()->isReadOnly())) askTrust(trustTarget());
+        else if (!root_.isEmpty()) untrustFolder(Trust::trustedParent(root_));
+    });
+    add(file, "Manage Trusted Folders…", {}, [this]() { manageTrustedFolders(); });
     file->addSeparator();
     add(file, "Save", {QKeySequence::Save}, [this]() { saveCurrent(); });
     add(file, "Save As…", seq("Ctrl+Shift+S"), [this]() { saveCurrentAs(); });
@@ -736,6 +789,8 @@ void MainWindow::buildActions() {
     add(edit, "Trigger Autocomplete", seq("Ctrl+Space"), onView(&CodeView::triggerAutocomplete));
     add(edit, "Expand Snippet", seq("Ctrl+J"), onView(&CodeView::expandSnippet));
     add(edit, "Manage Snippets…", {}, [this]() { editSnippets(); });
+    edit->addSeparator();
+    add(edit, "Format Document", seq("Shift+Alt+F"), onView(&CodeView::formatDocument));
 
     QMenu* search = menuBar()->addMenu("&Search");
     add(search, "Find…", {QKeySequence::Find}, [this]() { showFind(false); });
@@ -989,6 +1044,7 @@ void MainWindow::replaceOne() {
     CodeView* v = currentView();
     const std::string pat = find_->text().toUtf8().toStdString();
     if (!v || pat.empty()) return;
+    if (v->isReadOnly()) { refuse("Replace is off"); return; }
     const std::string rep = repl_->text().toUtf8().toStdString();
     Pos after;
     const Pos from = v->selStart();
@@ -1004,6 +1060,7 @@ void MainWindow::replaceEverything() {
     CodeView* v = currentView();
     const std::string pat = find_->text().toUtf8().toStdString();
     if (!v || pat.empty()) return;
+    if (v->isReadOnly()) { refuse("Replace is off"); return; }
     const std::string rep = repl_->text().toUtf8().toStdString();
     const ReplaceResult r = v->editor().replaceAll(pat, rep, searchOptions());
     v->notifyEdited(0);
@@ -1121,12 +1178,15 @@ bool MainWindow::openPath(const QString& path) {
 void MainWindow::refreshTab(CodeView* v) {
     const int i = tabs_->indexOf(v);
     if (i < 0) return;
+    applyTrustTo(v);
     const QString path = QString::fromStdString(v->editor().doc().path());
     QString name = path.isEmpty() ? v->property("untitledName").toString() : QFileInfo(path).fileName();
     if (v->editor().doc().modified()) name += QStringLiteral(" ●");
     tabs_->setTabText(i, name);
     tabs_->setTabIcon(i, Icons::forFile(path.isEmpty() ? QStringLiteral("untitled.txt") : path));
-    tabs_->setTabToolTip(i, path.isEmpty() ? name : QDir::toNativeSeparators(path));
+    QString tip = path.isEmpty() ? name : QDir::toNativeSeparators(path);
+    if (v->isReadOnly()) tip += "\nRead-only (Restricted Mode: the folder is not trusted)";
+    tabs_->setTabToolTip(i, tip);
 }
 
 void MainWindow::refreshTitle() {
@@ -1139,6 +1199,7 @@ void MainWindow::refreshTitle() {
 }
 
 void MainWindow::onTabChanged(int) {
+    applyTrust();                                          // the banner follows the current tab
     CodeView* v = currentView();
     if (outline_) outline_->setView(v);                    // the right-hand panels follow the current tab
     if (history_) history_->setView(v);
@@ -1200,6 +1261,7 @@ bool MainWindow::closeTab(int index, bool force) {
 // ---------------------------------------------------------------- files
 
 bool MainWindow::saveView(CodeView* v, bool forceDialog) {
+    if (v->isReadOnly()) { refuse("Saving is off"); return false; }
     QString path = QString::fromStdString(v->editor().doc().path());
     if (path.isEmpty() || forceDialog) {
         const QString start = path.isEmpty() ? QDir(root_.isEmpty() ? QDir::currentPath() : root_).filePath(v->property("untitledName").toString() + ".txt") : path;
@@ -1220,12 +1282,21 @@ bool MainWindow::saveView(CodeView* v, bool forceDialog) {
     return true;
 }
 
-void MainWindow::saveCurrent() { if (CodeView* v = currentView()) saveView(v, false); }
-void MainWindow::saveCurrentAs() { if (CodeView* v = currentView()) saveView(v, true); }
+// Settings > General > Format on save: only for saves the user asks for (never auto save, which runs
+// while typing and must not move code under the cursor).
+void MainWindow::formatBeforeSave(CodeView* v) {
+    if (v && AppSettings::instance().values().formatOnSave && v->canFormat()) v->formatDocument();
+}
+
+void MainWindow::saveCurrent() { if (CodeView* v = currentView()) { formatBeforeSave(v); saveView(v, false); } }
+void MainWindow::saveCurrentAs() { if (CodeView* v = currentView()) { formatBeforeSave(v); saveView(v, true); } }
 
 void MainWindow::saveAll() {
-    for (int i = 0; i < tabs_->count(); ++i)
-        if (viewAt(i)->editor().doc().modified() && !saveView(viewAt(i), false)) return;
+    for (int i = 0; i < tabs_->count(); ++i) {
+        if (!viewAt(i)->editor().doc().modified()) continue;
+        formatBeforeSave(viewAt(i));
+        if (!saveView(viewAt(i), false)) return;
+    }
 }
 
 void MainWindow::openDialog() {
@@ -1235,7 +1306,15 @@ void MainWindow::openDialog() {
 
 void MainWindow::openFolderDialog() {
     const QString d = QFileDialog::getExistingDirectory(this, "Open Folder", root_);
-    if (!d.isEmpty()) { setWorkspaceRoot(d); addRecentFolder(d); dock_->show(); }
+    if (!d.isEmpty()) openFolder(d);
+}
+
+void MainWindow::openFolder(const QString& dir, bool ask) {
+    if (!QFileInfo(dir).isDir()) return;
+    setWorkspaceRoot(dir);
+    addRecentFolder(root_);
+    dock_->show();
+    if (ask && restricted()) askTrust(root_);
 }
 
 void MainWindow::setWorkspaceRoot(const QString& dir) {
@@ -1248,6 +1327,7 @@ void MainWindow::setWorkspaceRoot(const QString& dir) {
     explorer_->setRoot(root_);
     terminal_->setWorkingDirectory(root_);
     welcome_->setFolderOpen(true);
+    applyTrust();
     if (CodeView* v = currentView()) explorer_->reveal(QString::fromStdString(v->editor().doc().path()));
 }
 
@@ -1298,11 +1378,153 @@ void MainWindow::goToLineDialog() {
     if (ok) { v->goToLine(l); v->setFocus(); }
 }
 
+// ---------------------------------------------------------------- folder trust (Restricted Mode)
+
+bool MainWindow::restricted() const { return !root_.isEmpty() && !Trust::isTrusted(root_); }
+
+bool MainWindow::fileTrusted(const QString& path) const { return path.isEmpty() || Trust::isTrusted(path); }
+
+bool MainWindow::runBlocked() const {
+    if (restricted()) return true;
+    const CodeView* v = currentView();
+    return v && !fileTrusted(QString::fromStdString(v->editor().doc().path()));
+}
+
+QString MainWindow::trustTarget() const {
+    if (restricted()) return root_;
+    const CodeView* v = currentView();
+    const QString p = v ? QString::fromStdString(v->editor().doc().path()) : QString();
+    return p.isEmpty() ? root_ : QFileInfo(p).absolutePath();
+}
+
+void MainWindow::refuse(const QString& what) {
+    statusBar()->showMessage(what + " in Restricted Mode: this folder is not trusted. Use \"Trust Folder\" to allow it.", 6000);
+    if (trustBar_) trustBar_->setVisible(true);
+}
+
+void MainWindow::applyTrustTo(CodeView* v) {
+    if (v) v->setReadOnly(!fileTrusted(QString::fromStdString(v->editor().doc().path())));
+}
+
+void MainWindow::applyTrust() {
+    if (!tabs_ || !explorer_) return;
+    for (int i = 0; i < tabs_->count(); ++i) applyTrustTo(viewAt(i));
+    const bool r = restricted();
+    explorer_->setReadOnly(r);
+    if (r && terminal_) {                                  // nothing keeps running for a folder that is not trusted
+        terminal_->stop();
+        if (terminalVisible()) hideBottom();
+    }
+    if (terminalAct_) terminalAct_->setEnabled(!r);
+    CodeView* v = currentView();
+    const bool fileRo = v && v->isReadOnly();
+    if (trustBar_) {
+        trustBar_->setVisible(r || fileRo);
+        const QString where = QDir::toNativeSeparators(trustTarget());
+        trustText_->setText("<b>Restricted Mode</b> — " + where.toHtmlEscaped() +
+                            " is not trusted, so its files are read-only and the terminal, Run (F5) and the compiler check are off. "
+                            "Trust it only if you trust its authors.");
+    }
+    if (restrictedBtn_) restrictedBtn_->setVisible(r || fileRo);
+    if (trustAct_) trustAct_->setText((r || fileRo) ? "Trust This Folder…" : "Restrict This Folder");
+    if (trustAct_) trustAct_->setEnabled(r || fileRo || !root_.isEmpty());
+    if ((r || fileRo) && checkTimer_) { checkTimer_->stop(); ++checkToken_; }   // a check that was already running is ignored
+}
+
+bool MainWindow::askTrust(const QString& dir) {
+    if (dir.isEmpty()) return false;
+    if (Trust::isTrusted(dir)) { applyTrust(); return true; }
+    QMessageBox box(QMessageBox::Warning, "Trust This Folder?",
+                    "Do you trust the authors of the files in this folder?\n\n" + QDir::toNativeSeparators(dir), QMessageBox::NoButton, this);
+    box.setInformativeText("DevPad opens folders you have not trusted in Restricted Mode: files are read-only, and the terminal, "
+                           "Run (F5) and the compiler check are off, so no code from the folder can run.\n\n"
+                           "Trust the folder only if you know where its code comes from. Folders inside it are trusted too.");
+    QPushButton* yes = box.addButton("Yes, I Trust the Authors", QMessageBox::AcceptRole);
+    QPushButton* no = box.addButton("No, Stay in Restricted Mode", QMessageBox::RejectRole);
+    box.setDefaultButton(no);
+    box.setEscapeButton(no);
+    box.exec();
+    if (box.clickedButton() != yes) { applyTrust(); return false; }
+    return trustFolder(dir);
+}
+
+bool MainWindow::trustFolder(const QString& dir) {
+    if (dir.isEmpty() || !QFileInfo(dir).isDir()) return false;
+    Trust::trustFolder(dir);
+    applyTrust();
+    for (int i = 0; i < tabs_->count(); ++i) refreshTab(viewAt(i));
+    statusBar()->showMessage("Trusted " + QDir::toNativeSeparators(Trust::normalize(dir)), 3000);
+    scheduleCheck(100);
+    return true;
+}
+
+void MainWindow::untrustFolder(const QString& dir) {
+    if (dir.isEmpty()) return;
+    Trust::untrustFolder(dir);
+    applyTrust();
+    for (int i = 0; i < tabs_->count(); ++i) refreshTab(viewAt(i));
+    refreshProblems();
+}
+
+void MainWindow::manageTrustedFolders() {
+    QDialog d(this);
+    d.setWindowTitle("Trusted Folders");
+    d.resize(560, 340);
+    QVBoxLayout* lay = new QVBoxLayout(&d);
+    QLabel* info = new QLabel("Files in these folders (and the folders inside them) can be edited, and the terminal, "
+                              "Run (F5) and the compiler check work there. Every other folder opens in Restricted Mode.", &d);
+    info->setWordWrap(true);
+    lay->addWidget(info);
+    QListWidget* list = new QListWidget(&d);
+    list->setObjectName("trustedList");
+    list->setSelectionMode(QAbstractItemView::ExtendedSelection);
+    auto fill = [list]() {
+        list->clear();
+        for (const QString& f : Trust::trustedFolders()) {
+            QListWidgetItem* it = new QListWidgetItem(QDir::toNativeSeparators(f), list);
+            it->setData(Qt::UserRole, f);
+        }
+    };
+    fill();
+    lay->addWidget(list, 1);
+    QHBoxLayout* row = new QHBoxLayout();
+    QPushButton* addBtn = new QPushButton("Add Folder…", &d);
+    QPushButton* removeBtn = new QPushButton("Remove", &d);
+    QPushButton* closeBtn = new QPushButton("Close", &d);
+    row->addWidget(addBtn);
+    row->addWidget(removeBtn);
+    row->addStretch(1);
+    row->addWidget(closeBtn);
+    lay->addLayout(row);
+    removeBtn->setEnabled(false);
+    connect(list, &QListWidget::itemSelectionChanged, &d, [list, removeBtn]() { removeBtn->setEnabled(!list->selectedItems().isEmpty()); });
+    connect(addBtn, &QPushButton::clicked, &d, [this, &d, fill]() {
+        const QString dir = QFileDialog::getExistingDirectory(&d, "Trust Folder", root_);
+        if (dir.isEmpty()) return;
+        Trust::trustFolder(dir);
+        fill();
+    });
+    connect(removeBtn, &QPushButton::clicked, &d, [list, fill]() {
+        for (QListWidgetItem* it : list->selectedItems()) Trust::untrustFolder(it->data(Qt::UserRole).toString());
+        fill();
+    });
+    connect(closeBtn, &QPushButton::clicked, &d, &QDialog::accept);
+    enableDarkTitleBar(&d);
+    d.exec();
+    applyTrust();
+    for (int i = 0; i < tabs_->count(); ++i) refreshTab(viewAt(i));
+    scheduleCheck(100);
+}
+
 // ---------------------------------------------------------------- rename
 
 bool MainWindow::renameCurrentFile(const QString& newName, QString* error) {
     CodeView* v = currentView();
     if (!v) return false;
+    if (v->isReadOnly()) {
+        if (error) *error = "Restricted Mode: files in a folder that is not trusted cannot be renamed.";
+        return false;
+    }
     IOResult r = v->editor().renameFile(newName.toUtf8().constData());
     if (!r.ok) {
         if (error) *error = QString::fromStdString(r.message);
@@ -1318,6 +1540,7 @@ bool MainWindow::renameCurrentFile(const QString& newName, QString* error) {
 void MainWindow::renameDialog() {
     CodeView* v = currentView();
     if (!v) return;
+    if (v->isReadOnly()) { refuse("Renaming is off"); return; }
     const QString path = QString::fromStdString(v->editor().doc().path());
     if (path.isEmpty()) {
         if (QMessageBox::question(this, "Rename File", "This file has not been saved yet. Save it first?") == QMessageBox::Yes)
@@ -1589,7 +1812,7 @@ void MainWindow::dropEvent(QDropEvent* e) {
     for (const QUrl& u : e->mimeData()->urls()) {
         if (!u.isLocalFile()) continue;
         const QString p = u.toLocalFile();
-        if (QFileInfo(p).isDir()) { setWorkspaceRoot(p); addRecentFolder(p); dock_->show(); }
+        if (QFileInfo(p).isDir()) openFolder(p);
         else openPath(p);
     }
 }

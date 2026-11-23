@@ -44,6 +44,7 @@
 #include "SnippetStore.h"
 #include "SyntaxChecker.h"
 #include "Theme.h"
+#include "Trust.h"
 
 static int g_checks = 0, g_failed = 0;
 #define CHECK(cond)                                                                     \
@@ -1217,6 +1218,48 @@ static void testBreadcrumbsAndTerminalLinks() {
     CHECK(!w.openLocation(QDir(root).filePath("nope.cpp"), 1, 1));
 }
 
+static void testFormatDocument() {
+    std::cout << "[format document]\n";
+    AppSettings::instance().resetToDefaults();
+    CodeView v;
+    v.resize(600, 400);
+    setText(&v, "int main(){\nint x=1;\nreturn x;\n}");
+    CHECK(v.canFormat());
+    v.setCursor(Pos{1, 4});                                       // on "x" of "int x=1;"
+    const size_t steps = v.editor().undoCount();
+    v.formatDocument();
+    CHECK_EQ(txt(&v), QString("int main() {\n    int x = 1;\n    return x;\n}\n"));
+    CHECK(v.editor().undoCount() == steps + 1);                  // one undo step
+    CHECK(v.cursor().line == 1 && v.cursor().col == 8);           // still on "x", moved with the indentation
+    v.formatDocument();                                           // already formatted: nothing recorded
+    CHECK(v.editor().undoCount() == steps + 1);
+    v.undo();
+    CHECK_EQ(txt(&v), QString("int main(){\nint x=1;\nreturn x;\n}\n"));
+    CodeView plain;
+    plain.setLanguageForPath("notes.txt");
+    setText(&plain, "  keep   me  ");
+    plain.formatDocument();                                       // plain text is not formatted
+    CHECK(!plain.canFormat() && txt(&plain) == QString("  keep   me  \n"));
+
+    // the menu entry and format on save
+    QTemporaryDir tmp;
+    const QString file = QDir(tmp.path()).filePath("f.cpp");
+    { QFile f(file); (void)f.open(QIODevice::WriteOnly); f.write("void f(){\nint a=1;\n}\n"); }
+    MainWindow w;
+    CHECK(w.openPath(file));
+    bool found = false;
+    for (QAction* a : w.findChildren<QAction*>()) found = found || (a->text() == "Format Document" && a->shortcut() == QKeySequence("Shift+Alt+F"));
+    CHECK(found);
+    AppSettings::Values s = AppSettings::instance().values();
+    s.formatOnSave = true;
+    AppSettings::instance().apply(s);
+    w.currentView()->editor().insertText(Pos{2, 1}, "\n");        // make it modified
+    w.currentView()->notifyEdited(2);
+    for (QAction* a : w.findChildren<QAction*>()) if (a->text() == "Save") a->trigger();
+    { QFile f(file); (void)f.open(QIODevice::ReadOnly); CHECK(QString::fromUtf8(f.readAll()).startsWith("void f() {\n    int a = 1;\n}")); }
+    AppSettings::instance().resetToDefaults();
+}
+
 static void testTerminal() {
     std::cout << "[terminal]\n";
     AppSettings::instance().resetToDefaults();
@@ -1642,6 +1685,91 @@ static void testSquigglesAndMainWindow() {
     for (int i = mw.tabCount() - 1; i >= 0; --i) mw.closeTab(i, true);
 }
 
+// Folder trust: a folder that is not trusted opens in Restricted Mode (read-only, nothing runs).
+static void testTrust() {
+    std::cout << "[folder trust, Restricted Mode]\n";
+    Trust::untrustFolder(QDir::tempPath());
+    QTemporaryDir tmp;
+    const QString root = QFileInfo(tmp.path()).canonicalFilePath();
+    const QString file = root + "/main.cpp";
+    { QFile f(file); f.open(QIODevice::WriteOnly); f.write("int main() { return 0; }\n"); }
+    CHECK(!Trust::isTrusted(root));
+    CHECK(!Trust::isTrusted(file));
+
+    MainWindow w;
+    w.resize(1000, 700);
+    w.show();
+    w.openFolder(root, false);
+    CHECK(w.restricted());
+    CHECK(w.openPath(file));
+    CodeView* v = w.currentView();
+    CHECK(v && v->isReadOnly());
+    CHECK(w.trustBar()->isVisible());
+    CHECK(w.explorer()->isReadOnly());
+    const QString before = txt(v);
+    type(v, "xyz");
+    key(v, Qt::Key_Backspace);
+    key(v, Qt::Key_Return);
+    v->paste();
+    v->deleteLine();
+    v->formatDocument();
+    CHECK_EQ(txt(v), before);
+    CHECK(!v->editor().doc().modified());
+    v->editor().insertText(Pos{0, 0}, "// x\n");              // even a change that slipped through cannot be saved
+    v->notifyEdited(0);
+    w.runCommand("File/Save");
+    { QFile f(file); f.open(QIODevice::ReadOnly); CHECK_EQ(QString::fromUtf8(f.readAll()), QString("int main() { return 0; }\n")); }
+    v->editor().undo();
+    v->notifyEdited(0);
+    CHECK(w.autoSaveNow() == 0);
+    QString err;
+    CHECK(w.explorer()->createFile(root, "new.txt", &err).isEmpty());
+    CHECK(!err.isEmpty());
+    CHECK(!QFileInfo::exists(root + "/new.txt"));
+    CHECK(!w.explorer()->removePath(file, true, &err));
+    CHECK(QFileInfo::exists(file));
+    CHECK(!w.renameCurrentFile("other.cpp", &err));
+    w.showTerminal(true);
+    CHECK(!w.terminalVisible());
+    CHECK(!w.runCurrent());
+    CHECK(!w.terminal()->busy());
+    // an untitled tab is the user's own text and stays editable
+    CodeView* u = w.newTab();
+    type(u, "ok");
+    CHECK_EQ(txt(u), QString("ok\n"));
+    w.closeTab(w.tabCount() - 1, true);
+
+    // trusting the folder lifts all of it
+    CHECK(w.trustFolder(root));
+    CHECK(!w.restricted());
+    CHECK(Trust::isTrusted(file));
+    CHECK(Trust::isTrusted(root + "/sub/deeper.cpp"));     // folders inside a trusted folder are trusted too
+    v = w.currentView();
+    CHECK(v && !v->isReadOnly());
+    CHECK(!w.trustBar()->isVisible());
+    CHECK(!w.explorer()->isReadOnly());
+    v->setCursor(Pos{0, 0});
+    type(v, "a");
+    CHECK(txt(v).startsWith("aint main"));
+    CHECK(!w.explorer()->createFile(root, "new.txt", &err).isEmpty());
+    w.showTerminal(true);
+    CHECK(w.terminalVisible());
+
+    // and taking the trust back closes the terminal and makes the files read-only again
+    w.untrustFolder(root);
+    CHECK(w.restricted());
+    CHECK(!w.terminalVisible());
+    CHECK(w.currentView()->isReadOnly());
+    // the list survives a restart (it is stored with QSettings) and ignores duplicates / trailing slashes
+    Trust::trustFolder(root + "/");
+    Trust::trustFolder(root);
+    CHECK(Trust::trustedFolders().count(Trust::normalize(root)) == 1);
+    Trust::untrustFolder(root);
+    CHECK(!Trust::isTrusted(root));
+    for (int i = w.tabCount() - 1; i >= 0; --i) w.closeTab(i, true);
+    Trust::trustFolder(QDir::tempPath());
+}
+
 int main(int argc, char** argv) {
     qputenv("QT_QPA_PLATFORM", qEnvironmentVariableIsSet("QT_QPA_PLATFORM") ? qgetenv("QT_QPA_PLATFORM") : QByteArray("offscreen"));
     QApplication app(argc, argv);
@@ -1649,6 +1777,7 @@ int main(int argc, char** argv) {
     QApplication::setOrganizationName("DevPadTests");
     QApplication::setApplicationName("DevPadTests");
     QSettings().clear();
+    Trust::trustFolder(QDir::tempPath());                 // the tests work in temporary folders (testTrust checks Restricted Mode)
     testTyping();
     testEnterTabAndBackspace();
     testLineCommands();
@@ -1670,12 +1799,14 @@ int main(int argc, char** argv) {
     testOutlineAndHistoryPanels();
     testWordWrap();
     testBreadcrumbsAndTerminalLinks();
+    testFormatDocument();
     testTerminal();
     testPanelsInMainWindow();
     testRun();
     testSnippetsInEditor();
     testProblemsPanel();
     testSquigglesAndMainWindow();
+    testTrust();
     QSettings().clear();
     std::cout << (g_checks - g_failed) << "/" << g_checks << " GUI checks passed";
     if (g_failed) std::cout << "  (" << g_failed << " FAILED)";

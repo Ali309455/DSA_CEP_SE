@@ -13,6 +13,7 @@
 #include "Theme.h"
 #include "SnippetStore.h"
 #include "Breadcrumbs.h"
+#include "Formatter.h"
 #include "Icons.h"
 #include <QDir>
 #include <QMenu>
@@ -688,6 +689,7 @@ void CodeView::unfoldAll() {
 }
 
 void CodeView::jumpToHistory(size_t undoSteps) {
+    if (blocked()) return;
     Pos where;
     hidePopup();
     if (ed_.jumpToHistory(undoSteps, &where) == 0) return;
@@ -696,6 +698,39 @@ void CodeView::jumpToHistory(size_t undoSteps) {
     compilerDiags_.clear();
     shiftFolds(cur_.line);
     edited(0);
+}
+
+// Format Document: the engine formats the text and applies only the changed lines, as ONE undo step.
+// The cursor stays on its line and keeps its place relative to the line's first character.
+void CodeView::formatDocument() {
+    if (blocked()) return;
+    if (!canFormat()) {
+        emit statusMessage("Format Document works on C, C++, Java, JavaScript and other languages with { } blocks.");
+        return;
+    }
+    hidePopup();
+    const auto leading = [](const std::string& s) { size_t i = 0; while (i < s.size() && (s[i] == ' ' || s[i] == '\t')) ++i; return i; };
+    const size_t line = cur_.line;
+    const size_t oldLead = leading(lineText(line));
+    FormatOptions opt;
+    opt.indentWidth = static_cast<size_t>(tabWidth_);
+    opt.tabWidth = static_cast<size_t>(tabWidth_);
+    size_t changed = 0;
+    try {
+        changed = ::formatDocument(ed_, opt);
+    } catch (const std::exception& e) {
+        emit statusMessage(QString("Format Document failed: %1").arg(QString::fromUtf8(e.what())));
+        return;
+    }
+    if (changed == 0) { emit statusMessage("Already formatted."); return; }
+    const size_t l = std::min(line, ed_.doc().lineCount() - 1);
+    const size_t newLead = leading(lineText(l));
+    const size_t col = cur_.col <= oldLead ? newLead : cur_.col - oldLead + newLead;
+    cur_ = anchor_ = clamp(Pos{l, col});
+    blockValid_ = 0;
+    compilerDiags_.clear();                 // line positions may have moved: the next check redraws the marks
+    edited(0);
+    emit statusMessage(QString("Formatted: %1 line%2 changed. Ctrl+Z undoes it.").arg(changed).arg(changed == 1 ? "" : "s"));
 }
 
 void CodeView::setSearchHighlights(const std::vector<Match>& m) {
@@ -845,6 +880,7 @@ bool CodeView::snippetAtCursor() const {
 }
 
 bool CodeView::tryExpandSnippet() {
+    if (blocked()) return false;
     snippetMsg_.clear();
     if (hasSelection()) { snippetMsg_ = "Clear the selection first to expand a snippet."; return false; }
     hidePopup();
@@ -865,6 +901,7 @@ bool CodeView::tryExpandSnippet() {
 }
 
 void CodeView::expandSnippet() {
+    if (blocked()) return;
     if (!tryExpandSnippet()) emit statusMessage(snippetMsg_);
 }
 
@@ -1281,6 +1318,7 @@ void CodeView::paintEvent(QPaintEvent*) {
 // ---------------------------------------------------------------- editing primitives
 
 void CodeView::deleteSelection() {
+    if (blocked()) return;
     if (!hasSelection()) return;
     const Pos a = selStart(), b = selEnd();
     ed_.deleteRange(a, b);
@@ -1289,6 +1327,7 @@ void CodeView::deleteSelection() {
 }
 
 void CodeView::insertTypedText(const std::string& s) {
+    if (blocked()) return;
     if (s.empty()) return;
     const size_t from = selStart().line;
     if (hasSelection()) cur_ = ed_.replaceRange(selStart(), selEnd(), s);
@@ -1298,6 +1337,7 @@ void CodeView::insertTypedText(const std::string& s) {
 }
 
 void CodeView::typeChar(char c) {
+    if (blocked()) return;
     const Document& doc = ed_.doc();
     const char closer = pairCloser(c);
     const bool opener = closer != 0;
@@ -1339,6 +1379,7 @@ void CodeView::typeChar(char c) {
 }
 
 void CodeView::backspace(bool word) {
+    if (blocked()) return;
     if (hasSelection()) { deleteSelection(); return; }
     const Pos p = cur_;
     if (p.col == 0) {
@@ -1370,6 +1411,7 @@ void CodeView::backspace(bool word) {
 }
 
 void CodeView::deleteForward(bool word) {
+    if (blocked()) return;
     if (hasSelection()) { deleteSelection(); return; }
     const Pos p = cur_;
     const std::string line = lineText(p.line);
@@ -1385,6 +1427,7 @@ void CodeView::deleteForward(bool word) {
 }
 
 void CodeView::pressEnter() {
+    if (blocked()) return;
     const size_t from = selStart().line;
     {
         EditGroup g(ed_, "new line");
@@ -1400,6 +1443,7 @@ void CodeView::pressEnter() {
 }
 
 void CodeView::pressTab(bool back) {
+    if (blocked()) return;
     if (back) { outdentSelection(); return; }
     if (hasSelection() && selStart().line != selEnd().line) { indentSelection(); return; }
     if (tryExpandSnippet()) return;                   // "for" + Tab -> the for-loop snippet
@@ -1415,6 +1459,7 @@ void CodeView::adjustBoth(const DynArray<ColEdit>& edits) {
 // ---------------------------------------------------------------- commands (slots)
 
 void CodeView::undo() {
+    if (blocked()) return;
     std::string label;
     Pos where;
     hidePopup();
@@ -1427,6 +1472,7 @@ void CodeView::undo() {
 }
 
 void CodeView::redo() {
+    if (blocked()) return;
     std::string label;
     Pos where;
     hidePopup();
@@ -1456,11 +1502,13 @@ void CodeView::copy() {
 
 void CodeView::cut() {
     copy();
+    if (blocked()) return;
     if (hasSelection()) deleteSelection();
     else deleteLine();
 }
 
 void CodeView::paste() {
+    if (blocked()) return;
     QString t = QGuiApplication::clipboard()->text();
     t.replace(QLatin1String("\r\n"), QLatin1String("\n"));
     t.replace(QLatin1Char('\r'), QLatin1Char('\n'));
@@ -1498,6 +1546,7 @@ void CodeView::selectLine() {
 }
 
 void CodeView::moveLinesUp() {
+    if (blocked()) return;
     size_t from, to;
     lineRangeOfSelection(from, to);
     if (!::moveLines(ed_, from, to, -1)) return;
@@ -1507,6 +1556,7 @@ void CodeView::moveLinesUp() {
 }
 
 void CodeView::moveLinesDown() {
+    if (blocked()) return;
     size_t from, to;
     lineRangeOfSelection(from, to);
     if (!::moveLines(ed_, from, to, +1)) return;
@@ -1516,6 +1566,7 @@ void CodeView::moveLinesDown() {
 }
 
 void CodeView::copyLinesDown() {
+    if (blocked()) return;
     size_t from, to;
     lineRangeOfSelection(from, to);
     duplicateLines(ed_, from, to);
@@ -1525,6 +1576,7 @@ void CodeView::copyLinesDown() {
 }
 
 void CodeView::copyLinesUp() {
+    if (blocked()) return;
     size_t from, to;
     lineRangeOfSelection(from, to);
     duplicateLines(ed_, from, to);                      // the cursor stays on the upper copy
@@ -1532,6 +1584,7 @@ void CodeView::copyLinesUp() {
 }
 
 void CodeView::deleteLine() {
+    if (blocked()) return;
     size_t from, to;
     lineRangeOfSelection(from, to);
     ed_.deleteLines(from, to);
@@ -1542,6 +1595,7 @@ void CodeView::deleteLine() {
 }
 
 void CodeView::toggleComment() {
+    if (blocked()) return;
     if (language_ == 2) return;
     size_t from, to;
     lineRangeOfSelection(from, to);
@@ -1552,6 +1606,7 @@ void CodeView::toggleComment() {
 }
 
 void CodeView::indentSelection() {
+    if (blocked()) return;
     size_t from, to;
     lineRangeOfSelection(from, to);
     DynArray<ColEdit> edits = indentLines(ed_, from, to, static_cast<size_t>(tabWidth_));
@@ -1561,6 +1616,7 @@ void CodeView::indentSelection() {
 }
 
 void CodeView::outdentSelection() {
+    if (blocked()) return;
     size_t from, to;
     lineRangeOfSelection(from, to);
     DynArray<ColEdit> edits = outdentLines(ed_, from, to, static_cast<size_t>(tabWidth_));
@@ -1570,12 +1626,14 @@ void CodeView::outdentSelection() {
 }
 
 void CodeView::newLineBelow() {
+    if (blocked()) return;
     const size_t l = cur_.line;
     cur_ = anchor_ = insertLineBelow(ed_, l, static_cast<size_t>(tabWidth_));
     edited(l);
 }
 
 void CodeView::newLineAbove() {
+    if (blocked()) return;
     const size_t l = cur_.line;
     cur_ = anchor_ = insertLineAbove(ed_, l, static_cast<size_t>(tabWidth_));
     edited(l);
@@ -1722,6 +1780,7 @@ void CodeView::keyPressEvent(QKeyEvent* e) {
         QAbstractScrollArea::keyPressEvent(e);
         return;
     }
+    if (blocked()) return;
     const std::string u = t.toUtf8().toStdString();
     if (u.size() == 1) typeChar(u[0]);
     else if (hasSelection()) insertTypedText(u);
@@ -1735,7 +1794,7 @@ void CodeView::keyPressEvent(QKeyEvent* e) {
 
 void CodeView::inputMethodEvent(QInputMethodEvent* e) {
     const QString commit = e->commitString();
-    if (!commit.isEmpty()) {
+    if (!commit.isEmpty() && !blocked()) {
         const std::string u = commit.toUtf8().toStdString();
         if (hasSelection()) insertTypedText(u);
         else { cur_ = ed_.typeText(cur_, u); anchor_ = cur_; edited(cur_.line); }
@@ -1838,6 +1897,20 @@ void CodeView::focusOutEvent(QFocusEvent* e) {
 
 // ---------------------------------------------------------------- autocomplete popup
 
+void CodeView::setReadOnly(bool on) {
+    if (readOnly_ == on) return;
+    readOnly_ = on;
+    if (on) { hidePopup(); autoTimer_.stop(); }
+    emit stateChanged();
+    viewport()->update();
+}
+
+bool CodeView::blocked() {
+    if (!readOnly_) return false;
+    emit statusMessage("Restricted Mode: this file is read-only because its folder is not trusted.");
+    return true;
+}
+
 bool CodeView::popupVisible() const { return popup_ && popup_->isVisible(); }
 
 void CodeView::hidePopup() {
@@ -1845,7 +1918,7 @@ void CodeView::hidePopup() {
     if (popup_) popup_->hide();
 }
 
-void CodeView::triggerAutocomplete() { showCompletions(true); }
+void CodeView::triggerAutocomplete() { if (blocked()) return; showCompletions(true); }
 
 void CodeView::showCompletions(bool force) {
     if (hasSelection()) { hidePopup(); return; }
@@ -1893,6 +1966,7 @@ void CodeView::showCompletions(bool force) {
 }
 
 void CodeView::acceptCompletion() {
+    if (blocked()) return;
     QListWidgetItem* it = popup_->currentItem();
     if (!it) { hidePopup(); return; }
     const bool isSnippet = it->data(Qt::UserRole + 1).toBool();

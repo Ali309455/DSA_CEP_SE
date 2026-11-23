@@ -36,6 +36,7 @@ public:
     void setLanguageForPath(const QString& path);
     QString languageName() const;
     QString commentMarker() const { return QString::fromStdString(comment_); }
+    bool canFormat() const { return language_ == 0; }   // Format Document works on brace languages (C, C++, Java, JS, ...)
 
     // ---- cursor and selection (engine positions: 0-based line, byte column) ----
     Pos cursor() const { return cur_; }
@@ -97,6 +98,11 @@ public:
     void refreshBreadcrumbs();
     void openBreadcrumb(int index, const QPoint& globalBelow);   // what a click on crumb 'index' does
 
+    // ---- read-only (Restricted Mode: the file's folder is not trusted) ----
+    // Moving, selecting, copying, searching and folding still work; every change to the text is refused.
+    void setReadOnly(bool on);
+    bool isReadOnly() const { return readOnly_; }
+
     int zoom() const { return zoom_; }
     void setZoom(int points);
 
@@ -126,6 +132,7 @@ public slots:
     void foldAll();
     void unfoldAll();
     void jumpToHistory(size_t undoSteps);   // Undo History panel: undo / redo to that point
+    void formatDocument();               // Shift+Alt+F: engine/Formatter.h, one undo step
 
 signals:
     void stateChanged();                 // cursor, selection, text, modified flag or report changed
@@ -182,6 +189,8 @@ private:
     size_t lastLineCount_ = 1;                // to move compiler marks when lines are added / removed
     unsigned revision_ = 0;
     QString snippetMsg_;
+    bool readOnly_ = false;
+    bool blocked();                           // read-only: says so in the status bar and returns true
     // folding and outline
     FoldSet folds_;                           // what is folded; maps lines <-> rows
     DynArray<FoldRange> foldRanges_;          // what can be folded (from the last bracket report)

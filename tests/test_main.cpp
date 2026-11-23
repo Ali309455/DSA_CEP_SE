@@ -1,8 +1,10 @@
 // test_main.cpp - console test suite for the engine (no GUI needed).
 // Build target: engine_tests.   Exit code 0 = all passed.
 
+#include <algorithm>
 #include <cstdio>
 #include <cctype>
+#include <initializer_list>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -23,6 +25,7 @@
 #include "Editor.h"
 #include "FileIO.h"
 #include "Folding.h"
+#include "Formatter.h"
 #include "Outline.h"
 #include "Stack.h"
 #include "Workspace.h"
@@ -2923,6 +2926,362 @@ static void testOutline() {
     }
 }
 
+// ------------------------------------------------------------------ formatter
+
+static std::string joinWithNewlines(std::initializer_list<const char*> lines) {
+    std::string s;
+    bool first = true;
+    for (const char* l : lines) {
+        if (!first) s += '\n';
+        s += l;
+        first = false;
+    }
+    return s;
+}
+
+// Every character except blanks and line breaks, in order: formatting may only change whitespace.
+static std::string nonBlank(const std::string& s) {
+    std::string r;
+    for (char c : s) if (c != ' ' && c != '\t' && c != '\n' && c != '\r') r += c;
+    return r;
+}
+
+static void testFormatterIndent() {
+    section("formatter: indentation");
+    const std::string in = joinWithNewlines({
+        "int main(){",
+        "int x=1;",
+        "if(x){",
+        "x++;",
+        "}else{",
+        "x--;",
+        "}",
+        "switch(x){",
+        "case 1:",
+        "foo();",
+        "break;",
+        "case 2: {",
+        "bar();",
+        "break;",
+        "}",
+        "default:",
+        "break;",
+        "}",
+        "return x;",
+        "}"});
+    const std::string want = joinWithNewlines({
+        "int main() {",
+        "    int x = 1;",
+        "    if (x) {",
+        "        x++;",
+        "    } else {",
+        "        x--;",
+        "    }",
+        "    switch (x) {",
+        "        case 1:",
+        "            foo();",
+        "            break;",
+        "        case 2: {",
+        "            bar();",
+        "            break;",
+        "        }",
+        "        default:",
+        "            break;",
+        "    }",
+        "    return x;",
+        "}"});
+    const std::string got = formatText(in);
+    CHECK(got == want);
+    if (got != want) std::cout << "----- got:\n" << got << "\n-----\n";
+    CHECK(formatText(got) == got);                                 // a second run changes nothing
+    // Allman braces, a brace-less if, nested blocks
+    const std::string allman = joinWithNewlines({"void f()", "{", "if (a)", "    g();", "while (b)", "{", "h();", "}", "}"});
+    const std::string allmanWant = joinWithNewlines({"void f()", "{", "    if (a)", "        g();", "    while (b)", "    {", "        h();", "    }", "}"});
+    CHECK(formatText(allman) == allmanWant);
+}
+
+static void testFormatterClassesAndAlignment() {
+    section("formatter: classes, namespaces, kept alignment");
+    const std::string in = joinWithNewlines({
+        "namespace app {",
+        "class Foo : public Bar {",
+        "  public:",
+        "Foo(int x) : x_(x) {}",
+        "      int size() const { return x_; }",
+        "private:",
+        "int x_;",
+        "};",
+        "}"});
+    const std::string want = joinWithNewlines({
+        "namespace app {",                                          // namespace bodies are not indented
+        "class Foo : public Bar {",
+        "public:",
+        "    Foo(int x) : x_(x) {}",
+        "    int size() const { return x_; }",
+        "private:",
+        "    int x_;",
+        "};",
+        "}"});
+    CHECK(formatText(in) == want);
+    // lines inside an open ( and continued statements keep their alignment and move with their line
+    const std::string shifted = joinWithNewlines({
+        "  void f(int a,",
+        "         int b) {",
+        "      call(a,",
+        "           b);",
+        "      int total = a +",
+        "                  b;",
+        "  }"});
+    const std::string shiftedWant = joinWithNewlines({
+        "void f(int a,",
+        "       int b) {",
+        "    call(a,",
+        "         b);",
+        "    int total = a +",
+        "                b;",
+        "}"});
+    const std::string got = formatText(shifted);
+    CHECK(got == shiftedWant);
+    if (got != shiftedWant) std::cout << "----- got:\n" << got << "\n-----\n";
+    // a lambda passed to a call: body one level in, "});" back at the call's level
+    const std::string lambda = joinWithNewlines({"void g() {", "connect(a, b, [this]() {", "go();", "});", "}"});
+    const std::string lambdaWant = joinWithNewlines({"void g() {", "    connect(a, b, [this]() {", "        go();", "    });", "}"});
+    CHECK(formatText(lambda) == lambdaWant);
+    // a list in braces: the first item sets the level, the rest keep their place relative to it
+    const std::string list = joinWithNewlines({"int v[] = {", "1, 2,", "3};"});
+    CHECK(formatText(list) == joinWithNewlines({"int v[] = {", "    1, 2,", "    3};"}));
+    // already well formatted code that once tripped the indenter: must come back unchanged
+    const std::string nestedFor = joinWithNewlines({
+        "void h() {",
+        "    for (int i = 0; i<n; ++i)",
+        "        for (int j = 0; j<m; ++j) {",            // brace on the body line of a brace-less for
+        "            work(i, j);",
+        "        }",
+        "}"});
+    CHECK(formatText(nestedFor) == nestedFor);
+    const std::string table = joinWithNewlines({
+        "const Row rows[] = {",
+        "    {\"a\", 1,",
+        "     {1, 2}},",                                   // a '{' after ',' is a list item, not a block brace
+        "    {\"b\", 2,",
+        "     {3, 4}},",
+        "};"});
+    CHECK(formatText(table) == table);
+    const std::string ifdef = joinWithNewlines({
+        "void k() {",
+        "    const int x =",
+        "#ifdef A",
+        "        1;",
+        "#else",
+        "        2;",                                      // starts from the state at #ifdef, not after "1;"
+        "#endif",
+        "    use(x);",
+        "}"});
+    CHECK(formatText(ifdef) == ifdef);
+}
+
+static void testFormatterUntouched() {
+    section("formatter: strings, comments, preprocessor untouched");
+    const std::string in = joinWithNewlines({
+        "#define  ADD(a,b)  ((a)+(b))",
+        "#include  <vector>   ",
+        "const char* s = \"a=b ,c  ( x )\";",
+        "char c=',';",
+        "/*   keep   this=1",
+        "       exactly */",
+        "auto r = R\"(x=1",
+        "   y  =  2 )\";",
+        "int y=2; //   note=3   ",
+        "int z = 3;   // aligned comment"});
+    const std::string want = joinWithNewlines({
+        "#define  ADD(a,b)  ((a)+(b))",
+        "#include  <vector>",                                       // only the trailing blanks went
+        "const char* s = \"a=b ,c  ( x )\";",
+        "char c = ',';",
+        "/*   keep   this=1",
+        "       exactly */",
+        "auto r = R\"(x=1",
+        "   y  =  2 )\";",
+        "int y = 2; //   note=3",
+        "int z = 3;   // aligned comment"});
+    const std::string got = formatText(in);
+    CHECK(got == want);
+    if (got != want) std::cout << "----- got:\n" << got << "\n-----\n";
+    CHECK(nonBlank(got) == nonBlank(in));
+    // empty lines: at most 2 in a row; trailing blanks removed; a string continued with '\' is kept
+    CHECK(formatText("a;\n\n\n\n\nb;   ") == "a;\n\n\nb;");
+    FormatOptions one;
+    one.maxBlankLines = 1;
+    CHECK(formatText("a;\n\n\n\nb;", one) == "a;\n\nb;");
+    const std::string cont = "const char* m = \"one \\\n   two  \";\nint q=1;";
+    CHECK(formatText(cont) == "const char* m = \"one \\\n   two  \";\nint q = 1;");
+}
+
+static void testFormatterSpacing() {
+    section("formatter: spacing between tokens");
+    struct Case { const char* in; const char* out; };
+    const Case cases[] = {
+        {"x=a+b*c;", "x = a + b*c;"},                              // * may be a pointer: left alone
+        {"f (x ,y);", "f(x, y);"},
+        {"if(a==b&&c!=d)return -1;", "if (a == b&&c != d)return -1;"},
+        {"for(int i=0;i<n;++i){", "for (int i = 0; i<n; ++i) {"},      // < may open a template: left alone
+        {"for(;;)", "for (;;)"},
+        {"call( a, b );", "call(a, b);"},
+        {"v[ i-1 ]=-x;", "v[i - 1] = -x;"},
+        {"return(x);", "return(x);"},                               // keyword: blank before ( not invented
+        {"std::cout<<\"n=\"<<n<<std::endl;", "std::cout << \"n=\" << n << std::endl;"},
+        {"a  =  b;", "a = b;"},
+        {"p->next=q;", "p->next = q;"},
+        {"auto l=[=](int a){return a;};", "auto l = [=](int a) {return a;};"},
+        {"bool operator==(const A& o) const;", "bool operator==(const A& o) const;"},
+        {"x=y?1:2;", "x = y?1:2;"},
+        {"std::vector<std::vector<int>> v;", "std::vector<std::vector<int>> v;"},
+        {"double d=1e-5+2.5e+3;", "double d = 1e-5 + 2.5e+3;"},
+        {"a = - -b;", "a = - -b;"},                                // "- -" must never become "--"
+        {"Foo() = default;", "Foo() = default;"},
+        {"int area()const{return w*h;}", "int area() const {return w*h;}"},
+        {"void run()override{", "void run() override {"},
+    };
+    bool allOk = true;
+    for (const Case& c : cases) {
+        const std::string got = formatText(c.in);
+        if (got != c.out) { allOk = false; std::cout << "  spacing: \"" << c.in << "\" -> \"" << got << "\" (wanted \"" << c.out << "\")\n"; }
+        if (formatText(got) != got) { allOk = false; std::cout << "  not stable: \"" << got << "\"\n"; }
+        if (nonBlank(got) != nonBlank(c.in)) { allOk = false; std::cout << "  changed a token: \"" << c.in << "\"\n"; }
+    }
+    CHECK(allOk);
+    FormatOptions noSpacing;
+    noSpacing.spacing = false;
+    CHECK(formatText("  x=a+b;   ", noSpacing) == "x=a+b;");          // indentation and trailing blanks only
+}
+
+// Rebuild b from a and the hunks: proves the hunks describe the change exactly.
+static DynArray<std::string> applyHunks(const DynArray<std::string>& a, const DynArray<std::string>& b, const DynArray<LineHunk>& h) {
+    DynArray<std::string> r;
+    size_t i = 0;
+    for (size_t k = 0; k < h.size(); ++k) {
+        while (i < h[k].oldStart) r.push_back(a[i++]);
+        for (size_t j = h[k].newStart; j < h[k].newEnd; ++j) r.push_back(b[j]);
+        i = h[k].oldEnd;
+    }
+    while (i < a.size()) r.push_back(a[i++]);
+    return r;
+}
+
+static DynArray<std::string> linesOf(std::initializer_list<const char*> l) {
+    DynArray<std::string> r;
+    for (const char* s : l) r.push_back(s);
+    return r;
+}
+
+static bool sameLines(const DynArray<std::string>& a, const DynArray<std::string>& b) {
+    if (a.size() != b.size()) return false;
+    for (size_t i = 0; i < a.size(); ++i) if (a[i] != b[i]) return false;
+    return true;
+}
+
+static void testFormatterDiff() {
+    section("formatter: line diff");
+    const DynArray<std::string> a = linesOf({"a", "b", "c", "d", "e"});
+    const DynArray<std::string> b = linesOf({"a", "x", "c", "e", "f"});
+    const DynArray<LineHunk> h = diffLines(a, b);
+    CHECK(sameLines(applyHunks(a, b, h), b));
+    CHECK(h.size() >= 1 && h[0].oldStart == 1);                     // "a" is common: not part of any change
+    CHECK(diffLines(a, a).empty());
+    const DynArray<std::string> shorter = linesOf({"a", "c", "e"});
+    const DynArray<LineHunk> h2 = diffLines(a, shorter);
+    CHECK(h2.size() == 2 && sameLines(applyHunks(a, shorter, h2), shorter));   // exactly "b" and "d" removed
+    if (h2.size() == 2) CHECK(h2[0].oldStart == 1 && h2[0].oldEnd == 2 && h2[0].newStart == h2[0].newEnd && h2[1].oldStart == 3);
+}
+
+static void testFormatterDiffRandom() {
+    section("formatter: line diff (random, against a plain LCS)");
+    std::srand(77);
+    bool ok = true;
+    for (int round = 0; round < 400 && ok; ++round) {
+        DynArray<std::string> a, b;
+        const size_t na = static_cast<size_t>(std::rand() % 25), nb = static_cast<size_t>(std::rand() % 25);
+        for (size_t i = 0; i < na; ++i) a.push_back(std::string(1, static_cast<char>('a' + std::rand() % 4)));
+        for (size_t i = 0; i < nb; ++i) b.push_back(std::string(1, static_cast<char>('a' + std::rand() % 4)));
+        const DynArray<LineHunk> h = diffLines(a, b);
+        if (!sameLines(applyHunks(a, b, h), b)) ok = false;
+        size_t removed = 0;
+        for (size_t k = 0; k < h.size(); ++k) {
+            removed += h[k].oldEnd - h[k].oldStart;
+            if (k > 0 && h[k].oldStart < h[k - 1].oldEnd) ok = false;   // blocks in order, not overlapping
+        }
+        if (na != nb) {                                                 // the LCS path keeps as many lines as possible
+            std::vector<std::vector<size_t>> L(na + 1, std::vector<size_t>(nb + 1, 0));
+            for (size_t i = na; i-- > 0;)
+                for (size_t j = nb; j-- > 0;) L[i][j] = a[i] == b[j] ? L[i + 1][j + 1] + 1 : std::max(L[i + 1][j], L[i][j + 1]);
+            if (na - removed != L[0][0]) ok = false;
+        }
+        if (!ok) std::cout << "  diff mismatch in round " << round << "\n";
+    }
+    CHECK(ok);
+}
+
+static void testFormatDocument() {
+    section("formatter: Format Document is one undo step");
+    Editor e;
+    e.insertText(Pos{0, 0}, "int f(){\nreturn 1;\n}\n\n\n\n\nint g(){return 2;}");
+    const std::string before = text(e.doc());
+    const size_t steps = e.undoCount();
+    const size_t changed = formatDocument(e);
+    const std::string after = text(e.doc());
+    CHECK(changed > 0 && after == "int f() {\n    return 1;\n}\n\n\nint g() {return 2;}");
+    CHECK(e.undoCount() == steps + 1);
+    CHECK(e.nextUndoLabel() == "format document");
+    CHECK(formatDocument(e) == 0 && e.undoCount() == steps + 1);    // already formatted: nothing recorded
+    CHECK(e.undo() && text(e.doc()) == before);
+    CHECK(e.redo() && text(e.doc()) == after);
+    // changes at the very end of the document (lines removed and lines changed)
+    Editor tail;
+    tail.insertText(Pos{0, 0}, "a;\nb=1;\n\n\n\n");
+    CHECK(formatDocument(tail) > 0 && text(tail.doc()) == "a;\nb = 1;\n\n");
+    Editor empty;
+    CHECK(formatDocument(empty) == 0 && text(empty.doc()).empty());
+}
+
+// The strongest test: the project's own source files. Formatting may only change whitespace, and a
+// second run must change nothing.
+static void testFormatterOnProjectFiles() {
+    section("formatter: the project's own files");
+#ifdef DEVPAD_SOURCE_DIR
+    const char* files[] = {"engine/Document.cpp", "engine/Editor.cpp", "engine/Brackets.cpp", "engine/Trie.cpp", "engine/Search.cpp",
+                           "engine/Folding.cpp", "engine/Outline.cpp", "engine/Formatter.cpp", "engine/Diagnostics.cpp",
+                           "engine/HashTable.h", "engine/Snippets.cpp", "app/console_main.cpp", "gui/CodeView.cpp",
+                           "gui/MainWindow.cpp", "gui/Theme.cpp", "tests/test_main.cpp", nullptr};
+    size_t checked = 0, changedLines = 0, totalLines = 0;
+    bool tokensKept = true, stable = true;
+    for (int i = 0; files[i]; ++i) {
+        std::ifstream in(std::string(DEVPAD_SOURCE_DIR) + "/" + files[i], std::ios::binary);
+        if (!in) continue;
+        const std::string src((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        const std::string once = formatText(src);
+        const std::string twice = formatText(once);
+        ++checked;
+        if (nonBlank(once) != nonBlank(src)) { tokensKept = false; std::cout << "  token changed in " << files[i] << "\n"; }
+        if (twice != once) { stable = false; std::cout << "  second run changed " << files[i] << "\n"; }
+        Document a, b;
+        a.loadFromString(src);
+        b.loadFromString(once);
+        DynArray<std::string> la, lb;
+        for (size_t l = 0; l < a.lineCount(); ++l) la.push_back(a.getLine(l));
+        for (size_t l = 0; l < b.lineCount(); ++l) lb.push_back(b.getLine(l));
+        const DynArray<LineHunk> h = diffLines(la, lb);
+        for (size_t k = 0; k < h.size(); ++k) changedLines += h[k].oldEnd - h[k].oldStart;
+        totalLines += la.size();
+    }
+    std::cout << "  " << checked << " files, " << totalLines << " lines; formatting would change " << changedLines << " of them\n";
+    CHECK(checked >= 10);
+    CHECK(tokensKept);
+    CHECK(stable);
+#else
+    std::cout << "  (DEVPAD_SOURCE_DIR not set: skipped)\n";
+#endif
+}
+
 static void testFileRefs() {
     section("file references in terminal output");
     DynArray<FileRef> r = findFileRefs("main.cpp:12:5: error: expected ';'");
@@ -3044,6 +3403,14 @@ int main() {
     testOutline();
     testHistoryTimeline();
     testFileRefs();
+    testFormatterIndent();
+    testFormatterClassesAndAlignment();
+    testFormatterUntouched();
+    testFormatterSpacing();
+    testFormatterDiff();
+    testFormatterDiffRandom();
+    testFormatDocument();
+    testFormatterOnProjectFiles();
 
     std::cout << "\n" << (g_checks - g_failed) << "/" << g_checks << " checks passed";
     if (g_failed) std::cout << "  (" << g_failed << " FAILED)";

@@ -63,6 +63,7 @@ const QList<ShortcutsDialog::Entry>& ShortcutsDialog::entries() {
         {"Editing", "Select all", {"Ctrl+A"}},
         {"Editing", "Autocomplete", {"Ctrl+Space"}},
         {"Editing", "Expand snippet (type the trigger, e.g. for)", {"Tab", "Ctrl+J"}},
+        {"Editing", "Format document (indentation and spacing, one undo step)", {"Shift+Alt+F"}},
         {"Editing", "Zoom in", {"Ctrl+="}},
         {"Editing", "Zoom out", {"Ctrl+-"}},
         {"Editing", "Reset zoom", {"Ctrl+0"}},

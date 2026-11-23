@@ -82,7 +82,7 @@ cmake --build build-console --parallel
 ./build-console/engine_tests
 ```
 
-`engine_tests` should end with `18984/18984 checks passed`.
+`engine_tests` should end with `19018/19018 checks passed`.
 
 ### 2.3 Using the console editor
 
@@ -168,6 +168,7 @@ Please open the project folder (`.\build\devpad.exe .`) and a `.cpp` file from i
 | Undo History | `Ctrl+Shift+H`; make a few edits, then click an earlier row to go back to it |
 | Breadcrumbs | the bar above the text; click the file name for a menu of every function |
 | Word wrap | `Alt+Z` with a long line in the file |
+| Format Document | mess up the indentation and spacing of a `.cpp` file, press `Shift+Alt+F`, then `Ctrl+Z` to see it is one undo step (console: `format`) |
 | Clickable errors | introduce a syntax error, press `F5`, then click the `file.cpp:line:col` in the terminal |
 | Themes | View > Theme > Jellyfish, or `Ctrl+Shift+L` to switch between a theme's light and dark versions |
 

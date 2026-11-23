@@ -15,6 +15,7 @@ The GUI (DevPad, Qt Widgets) is a thin layer on top; all editing logic lives in 
 | **4c** | Diagnostics: compiler (`g++ -fsyntax-only`) + bracket errors in one list; red / yellow squiggles, Problems tab, console `check` | **done** |
 | **5** | **DevPad**: Qt Widgets GUI built with CMake - multi-tab editing, line move / copy, auto-pairs and wrapping selections in `() [] {} "" ''`, Ctrl+Tab, Quick Open, rename file, find / replace, file tree | **done** |
 | **5b** | **DevPad refining**: Command Palette, code folding, Outline and Undo History panels, breadcrumbs, word wrap, clickable `file:line` links in the terminal, 14 themes with 10 syntax colours each | **done** |
+| **5c** | **Format Document** (`engine/Formatter.*`): tokenizer state machine, indentation by a bracket stack, spacing rules, line diff (LCS) so a format is one undo step; GUI `Shift+Alt+F`, format on save, console `format` | **done** |
 | 6 | Report, complexity table, screenshots | |
 
 ## Build (Windows, MSYS2 MinGW64 shell)
@@ -61,6 +62,7 @@ engine/Assist.h/cpp   autocomplete (keywords trie + document-words trie), applyC
 engine/FileIO.h/cpp   open / save / save-as, errors returned not thrown
 engine/EditOps.h/cpp  code-editor commands: move / duplicate / indent / comment lines, auto-pair, wrap selection, smart Enter
 engine/Workspace.h/cpp folder listing + fuzzy file search (Quick Open, Command Palette)
+engine/Formatter.h/cpp Format Document: tokenizer, indentation stack, spacing rules, LCS line diff, one undo step
 engine/Folding.h/cpp  code folding: fold ranges (bracket pairs / indentation stack), FoldSet line <-> row map (binary search)
 engine/Outline.h/cpp  symbols for the Outline panel: class / struct / enum / function headers, nesting by stack
 gui/CodeView.h/cpp    the text area: custom-painted Qt widget on top of Editor (no QTextDocument); folding, word wrap, breadcrumbs
@@ -258,7 +260,7 @@ key presses into engine calls.
 | Search | `Ctrl+F` find, `Ctrl+H` replace, `F3` / `Shift+F3` next / previous, `Ctrl+G` go to line, `Ctrl+Space` autocomplete, `Ctrl+Shift+P` Command Palette (run any menu command by name) |
 | Folding | `Ctrl+Shift+[` fold the block at the cursor (again: the block around it), `Ctrl+Shift+]` unfold; click the arrow next to a line number; Edit > Folding > Fold All / Unfold All |
 | Panels | `Ctrl+F12` Outline, `Ctrl+Shift+H` Undo History, `Ctrl+\`` Terminal, `Ctrl+Shift+M` Problems, `Alt+Z` word wrap |
-| Edit | `Ctrl+Z`, `Ctrl+Y` / `Ctrl+Shift+Z`, cut / copy / paste (copy or cut with nothing selected takes the whole line), `Ctrl+Wheel` / `Ctrl+=` / `Ctrl+-` zoom |
+| Edit | `Ctrl+Z`, `Ctrl+Y` / `Ctrl+Shift+Z`, cut / copy / paste (copy or cut with nothing selected takes the whole line), `Ctrl+Wheel` / `Ctrl+=` / `Ctrl+-` zoom, `Shift+Alt+F` Format Document |
 | Explorer (sidebar focused) | click / `Enter` open file or open/close folder, `F2` rename in place, `Del` delete to the Recycle Bin, `Shift+Del` delete permanently, `Ctrl+X` / `Ctrl+C` / `Ctrl+V` cut / copy / paste files, drag onto a folder to move (`Ctrl`+drag copies) |
 
 ### Settings, terminal and Run (GUI refining)
@@ -277,6 +279,8 @@ key presses into engine calls.
   `F5` / `Shift+F5`. Run is green and Stop red only while they can be used; otherwise they are dimmed.
 - **Auto save** (Settings > General, off by default): saves modified files that already have a name once you have stopped
   typing for the chosen delay (1 to 300 seconds, 3 by default).
+- **Format on save** (Settings > General, off by default): `Ctrl+S`, Save As and Save All run Format Document first.
+  Auto save never formats, so code does not move while you type.
 - **Snippets in suggestions**: the autocomplete list shows matching snippet triggers first (marked "snippet"); accepting one
   expands it. Edit > Manage Snippets... adds, edits and deletes them.
 - **Run** (`F5`): saves the file, builds it if needed and runs it in the terminal, in the file's folder. `Shift+F5`
@@ -325,6 +329,20 @@ otherwise JetBrains Mono, Fira Code or Consolas.
   breaking after the last space that fits, with no sideways scroll bar. Up / Down move one screen row and keep the
   column; clicks, selection, search highlights, squiggles and folding all follow the wrapped rows. Off for files
   over about 3 MB to keep typing fast.
+- **Format Document** (`Shift+Alt+F`, Edit > Format Document, console `format`): tidies a C / C++ (or other `{ }`
+  language) file in one undo step:
+  - **Indentation** from the nesting of `{ }`: block bodies one level in, case labels one level inside their switch and
+    their statements one more, `public:` / `private:` at the level of their class, namespace bodies not indented
+    (this project's style), `#` lines left where they are.
+  - **Spacing**: `a=b` → `a = b`, `a+b` → `a + b`, `f (x)` → `f(x)`, `if(` → `if (`, `x ,y` → `x, y`, `( a )` → `(a)`,
+    `){` → `) {`, `}else` → `} else`, `f()const` → `f() const`, runs of blanks → one; `*`, `&`, `<`, `>` and `?:` are
+    left alone because they can mean pointers, references or templates.
+  - Trailing blanks removed, at most 2 empty lines in a row.
+  - **Never changed:** strings, character literals, raw strings, comments and preprocessor lines. Lines it cannot
+    place for sure (inside an open `(` from an earlier line, a continued statement, the inside of a `/* */` comment)
+    keep their alignment and move with the line they continue. Only whitespace between tokens changes, so the
+    program means exactly the same: a test formats 16 of this project's own files (11,000+ lines) and checks that no
+    token changed and that a second run changes nothing.
 
 ### Welcome page
 
@@ -370,6 +388,10 @@ an offer to delete permanently when the drive has none.
 | Undo History panel | reads the two undo / redo stacks with `Stack::peek`; jumping = repeated undo / redo | O(1) per row, O(steps) per jump |
 | Word wrap | first row of every line as prefix sums; row -> line by binary search; rebuilt lazily after an edit, a fold or a resize | O(log n) per lookup, O(N) per rebuild |
 | Terminal links (`findFileRefs`) | one left-to-right scan for `path:line[:col]` and Python `File "x", line N` | O(length of the line) |
+| Format Document: tokens (`Formatter.cpp`) | a state machine per line (code, block comment, raw string, continued string) with the state carried to the next line | O(characters) |
+| Format Document: indentation | a `Stack` of open brackets, each remembering its opener line's indentation and how far that line moved; `#if` / `#else` branches start from a saved copy of the indenter's state | O(tokens) |
+| Format Document: spacing | a rule per pair of neighbouring tokens (lookup in small word / operator tables) | O(tokens) |
+| Format Document: applying | line diff: common start and end cut off, the middle aligned by the longest common subsequence (dynamic programming, 16-bit table up to 4 million cells); only changed lines are replaced, bottom to top, in one `EditGroup` | O(n·m) for the changed middle, usually tiny |
 
 ## Complexity (phase 1)
 
@@ -410,7 +432,7 @@ Space: O(N) for text, plus two pointers and one array header per line.
 ## Console commands
 
 Type `help` inside the editor. Lines and columns start at 1.
-`new open save saveas show info append addline ins nl del delword delrange dellines replace find replaceall replacenth undo redo history brackets match complete accept dictadd dictdel expand snippet check quit`
+`new open save saveas show info append addline ins nl del delword delrange dellines replace find replaceall replacenth undo redo history brackets match complete accept dictadd dictdel expand snippet check format quit`
 
 ## Snippets, error checking and the Problems tab (phase 4b / 4c)
 

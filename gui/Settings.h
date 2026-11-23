@@ -38,6 +38,7 @@ public:
         bool restoreSession = true;
         bool autoSave = false;             // save modified files by themselves (off by default)
         int autoSaveDelay = 3;             // seconds after the last edit: 1 to 300
+        bool formatOnSave = false;         // Ctrl+S / Save As / Save All run Format Document first (brace languages)
 
         bool operator==(const Values& o) const;
         bool operator!=(const Values& o) const { return !(*this == o); }

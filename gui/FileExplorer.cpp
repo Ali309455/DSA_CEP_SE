@@ -271,7 +271,7 @@ FileExplorer::FileExplorer(QWidget* parent) : QWidget(parent) {
 ExplorerModel* FileExplorer::makeModel() {
     ExplorerModel* m = new ExplorerModel(this);
     m->setFilter(QDir::AllDirs | QDir::Files | QDir::NoDotAndDotDot);
-    m->setReadOnly(false);                       // allows inline rename and dropping onto folders
+    m->setReadOnly(readOnly_);                   // writable: allows inline rename and dropping onto folders
     m->setIconProvider(noIcons());
     connect(m, &QFileSystemModel::directoryLoaded, this, [this]() {
         if (!pendingExpand_.isEmpty()) expandPending();
@@ -443,7 +443,17 @@ void FileExplorer::onClicked(const QModelIndex& idx) {
 
 // ---------------------------------------------------------------- operations
 
+static const char* kRestricted = "Restricted Mode: files in a folder that is not trusted cannot be created, renamed, moved or deleted.";
+
+void FileExplorer::setReadOnly(bool on) {
+    readOnly_ = on;
+    if (model_) model_->setReadOnly(on);
+    tree_->setDragDropMode(on ? QAbstractItemView::DragOnly : QAbstractItemView::DragDrop);
+    tree_->setAcceptDrops(!on);
+}
+
 QString FileExplorer::createFile(const QString& folder, const QString& name, QString* error) {
+    if (readOnly_) { if (error) *error = kRestricted; return QString(); }
     std::string np;
     const IOResult r = ::createFile(u8(folder), u8(name.trimmed()), &np);
     if (!r.ok) { if (error) *error = qs(r.message); return QString(); }
@@ -452,6 +462,7 @@ QString FileExplorer::createFile(const QString& folder, const QString& name, QSt
 }
 
 QString FileExplorer::createFolder(const QString& folder, const QString& name, QString* error) {
+    if (readOnly_) { if (error) *error = kRestricted; return QString(); }
     std::string np;
     const IOResult r = ::createFolder(u8(folder), u8(name.trimmed()), &np);
     if (!r.ok) { if (error) *error = qs(r.message); return QString(); }
@@ -460,6 +471,7 @@ QString FileExplorer::createFolder(const QString& folder, const QString& name, Q
 }
 
 QString FileExplorer::renamePath(const QString& path, const QString& newName, QString* error) {
+    if (readOnly_) { if (error) *error = kRestricted; return QString(); }
     std::string np;
     IOResult r{false, ""};
     auto op = [&]() {
@@ -489,6 +501,7 @@ QString FileExplorer::copyPath(const QString& path, const QString& destFolder, Q
 }
 
 QStringList FileExplorer::transfer(const QStringList& paths, const QString& destFolder, bool move, QStringList* errors) {
+    if (readOnly_) { if (errors) *errors << kRestricted; return {}; }
     QStringList done;
     QList<QPair<QString, QString>> moved;
     auto op = [&]() {
@@ -528,6 +541,7 @@ static bool removeOne(const QString& path, bool permanently, QString* error) {
 }
 
 QStringList FileExplorer::removePaths(const QStringList& paths, bool permanently, QStringList* errors) {
+    if (readOnly_) { if (errors) *errors << kRestricted; return {}; }
     QStringList done;
     auto op = [&]() {
         for (const QString& p : paths) {
@@ -577,6 +591,7 @@ void FileExplorer::warn(const QString& title, const QStringList& errors) {
 
 void FileExplorer::newFileDialog() {
     if (root_.isEmpty()) { emit openFolderRequested(); return; }
+    if (readOnly_) { warn("New File", {kRestricted}); return; }
     const QString folder = targetFolder();
     bool ok = false;
     const QString name = QInputDialog::getText(this, "New File",
@@ -592,6 +607,7 @@ void FileExplorer::newFileDialog() {
 
 void FileExplorer::newFolderDialog() {
     if (root_.isEmpty()) { emit openFolderRequested(); return; }
+    if (readOnly_) { warn("New Folder", {kRestricted}); return; }
     const QString folder = targetFolder();
     bool ok = false;
     const QString name = QInputDialog::getText(this, "New Folder", "Folder name:", QLineEdit::Normal, QString(), &ok);
@@ -603,6 +619,7 @@ void FileExplorer::newFolderDialog() {
 }
 
 void FileExplorer::renameSelected() {
+    if (readOnly_) { warn("Rename", {kRestricted}); return; }
     const QModelIndex idx = tree_->currentIndex();
     if (!idx.isValid()) return;
     tree_->scrollTo(idx);
@@ -610,6 +627,7 @@ void FileExplorer::renameSelected() {
 }
 
 void FileExplorer::deleteSelected(bool permanently) {
+    if (readOnly_) { warn("Delete", {kRestricted}); return; }
     const QStringList paths = selectedPaths();
     if (paths.isEmpty()) return;
     int unsaved = 0;
@@ -679,11 +697,13 @@ void FileExplorer::showMenu(const QPoint& pos) {
         m.addAction("Open", this, [this, one]() { emit openRequested(one); });
         m.addSeparator();
     }
-    m.addAction("New File…", this, &FileExplorer::newFileDialog);
-    m.addAction("New Folder…", this, &FileExplorer::newFolderDialog);
-    m.addSeparator();
+    if (!readOnly_) {
+        m.addAction("New File…", this, &FileExplorer::newFileDialog);
+        m.addAction("New Folder…", this, &FileExplorer::newFolderDialog);
+        m.addSeparator();
+    }
     if (!sel.isEmpty()) {
-        m.addAction("Cut", this, [this, sel]() { setClipboard(sel, true); })->setShortcut(QKeySequence::Cut);
+        if (!readOnly_) m.addAction("Cut", this, [this, sel]() { setClipboard(sel, true); })->setShortcut(QKeySequence::Cut);
         m.addAction("Copy", this, [this, sel]() { setClipboard(sel, false); })->setShortcut(QKeySequence::Copy);
     }
     QAction* pasteAct = m.addAction("Paste", this, [this, dest]() {
@@ -693,8 +713,9 @@ void FileExplorer::showMenu(const QPoint& pos) {
         warn("Paste", errors);
     });
     pasteAct->setShortcut(QKeySequence::Paste);
-    pasteAct->setEnabled(canPaste());
-    if (!sel.isEmpty()) m.addAction("Duplicate", this, &FileExplorer::duplicateSelected);
+    pasteAct->setEnabled(canPaste() && !readOnly_);
+    pasteAct->setVisible(!readOnly_);
+    if (!sel.isEmpty() && !readOnly_) m.addAction("Duplicate", this, &FileExplorer::duplicateSelected);
     m.addSeparator();
     const QStringList forPath = sel.isEmpty() ? QStringList{root_} : sel;
     m.addAction("Copy Path", this, [forPath]() {
@@ -716,11 +737,11 @@ void FileExplorer::showMenu(const QPoint& pos) {
 #endif
     const QString revealPath = one.isEmpty() ? (sel.isEmpty() ? root_ : sel[0]) : one;
     m.addAction(revealText, this, [this, revealPath]() { revealInSystem(revealPath); });
-    if (!sel.isEmpty()) {
+    if (!sel.isEmpty() && !readOnly_) {
         m.addSeparator();
         if (!one.isEmpty()) m.addAction("Rename…", this, &FileExplorer::renameSelected)->setShortcut(QKeySequence(Qt::Key_F2));
         m.addAction("Delete", this, [this]() { deleteSelected(false); })->setShortcut(QKeySequence::Delete);
-    } else {
+    } else if (sel.isEmpty()) {
         m.addSeparator();
         m.addAction("Refresh", this, &FileExplorer::refresh);
         m.addAction("Collapse Folders", this, &FileExplorer::collapseAll);

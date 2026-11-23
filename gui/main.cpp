@@ -22,10 +22,10 @@ int main(int argc, char** argv) {
     installDarkTitleBars();                            // dialogs get the dark Windows title bar too
 
     MainWindow w;
-    bool any = false;
+    bool any = false, askTrust = false;
     for (int i = 1; i < argc; ++i) {
         const QFileInfo fi(QString::fromLocal8Bit(argv[i]));
-        if (fi.isDir()) { w.setWorkspaceRoot(fi.absoluteFilePath()); w.addRecentFolder(fi.absoluteFilePath()); any = true; }
+        if (fi.isDir()) { w.openFolder(fi.absoluteFilePath(), false); any = true; askTrust = true; }
         else if (fi.isFile()) { w.openPath(fi.absoluteFilePath()); any = true; }
     }
     if (!any && snapshot.isEmpty()) w.restoreSession();
@@ -44,5 +44,8 @@ int main(int argc, char** argv) {
         });
     }
     w.show();
+    // a folder from the command line that is not trusted: ask once the window is up (Restricted Mode until then)
+    if (askTrust && snapshot.isEmpty() && w.restricted())
+        QTimer::singleShot(0, &w, [&w]() { w.askTrust(w.workspaceRoot()); });
     return app.exec();
 }

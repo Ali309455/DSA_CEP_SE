@@ -25,6 +25,7 @@
 #include "Document.h"
 #include "Editor.h"
 #include "FileIO.h"
+#include "Formatter.h"
 #include "Search.h"
 
 static void printHelp() {
@@ -66,6 +67,7 @@ static void printHelp() {
         "      \\n is a line break, \\t a tab, \\\" a quote, \\\\ a backslash.\n"
         "  Code help (phase 4):\n"
         "    check                       compiler check (g++ -fsyntax-only) + brackets: every error / warning with line:column\n"
+        "    format                      tidy indentation and spacing (C / C++ style, one undo step)\n"
         "    brackets                    check ( ) [ ] { } in the document (ignores strings and comments)\n"
         "    match <line> <col>          show the partner of the bracket at / just before a position\n"
         "    complete <prefix>           suggest words (C++ keywords + words in this document)\n"
@@ -576,6 +578,11 @@ static bool execute(Editor& ed, Autocomplete& ac, SnippetTable& sn, const std::s
         std::cout << "; can redo " << ed.redoCount() << " step(s)";
         if (ed.canRedo()) std::cout << " (next: " << ed.nextRedoLabel() << ")";
         std::cout << ". History keeps the latest " << ed.historyLimit() << " steps.\n";
+    } else if (cmd == "format") {
+        if (!rest.empty()) throw std::invalid_argument("Usage: format");
+        const size_t changed = formatDocument(ed);
+        if (changed == 0) std::cout << "Already formatted.\n";
+        else std::cout << "Formatted: " << changed << " line(s) changed. 'undo' restores the old layout.\n";
     } else if (cmd == "check" || cmd == "problems") {
         if (!rest.empty()) throw std::invalid_argument("Usage: check");
         checkCommand(doc);

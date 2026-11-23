@@ -11,7 +11,8 @@ bool AppSettings::Values::operator==(const Values& o) const {
            indentGuides == o.indentGuides && highlightLine == o.highlightLine && matchBrackets == o.matchBrackets &&
            statusBar == o.statusBar && terminalFontSize == o.terminalFontSize && terminalShell == o.terminalShell &&
            terminalScrollback == o.terminalScrollback && restoreSession == o.restoreSession && autoSave == o.autoSave &&
-           autoSaveDelay == o.autoSaveDelay && wordWrap == o.wordWrap && breadcrumbs == o.breadcrumbs;
+           autoSaveDelay == o.autoSaveDelay && wordWrap == o.wordWrap && breadcrumbs == o.breadcrumbs &&
+           formatOnSave == o.formatOnSave;
 }
 
 static const AppSettings::Accent kAccents[] = {
@@ -80,6 +81,7 @@ void AppSettings::load() {
     v.statusBar = s.value("statusBar", d.statusBar).toBool();
     v.wordWrap = s.value("wordWrap", d.wordWrap).toBool();
     v.breadcrumbs = s.value("breadcrumbs", d.breadcrumbs).toBool();
+    v.formatOnSave = s.value("formatOnSave", d.formatOnSave).toBool();
     v.terminalFontSize = s.value("terminalFontSize", d.terminalFontSize).toInt();
     v.terminalShell = s.value("terminalShell", d.terminalShell).toString();
     v.terminalScrollback = s.value("terminalScrollback", d.terminalScrollback).toInt();
@@ -109,6 +111,7 @@ void AppSettings::save() const {
     s.setValue("statusBar", v_.statusBar);
     s.setValue("wordWrap", v_.wordWrap);
     s.setValue("breadcrumbs", v_.breadcrumbs);
+    s.setValue("formatOnSave", v_.formatOnSave);
     s.setValue("terminalFontSize", v_.terminalFontSize);
     s.setValue("terminalShell", v_.terminalShell);
     s.setValue("terminalScrollback", v_.terminalScrollback);

@@ -29,6 +29,11 @@ public:
     void setRoot(const QString& dir);
     QString root() const { return root_; }
 
+    // Restricted Mode (the folder is not trusted): browsing and opening only; every operation that
+    // creates, renames, moves, copies or deletes something fails with an explanation.
+    void setReadOnly(bool on);
+    bool isReadOnly() const { return readOnly_; }
+
     // Expand the tree down to 'path', select it and scroll to it (nothing if it is not below the root).
     void reveal(const QString& path);
     QString currentPath() const;
@@ -86,6 +91,7 @@ protected:
 private:
     friend class ExplorerModel;
     QString root_;
+    bool readOnly_ = false;
     ExplorerModel* model_ = nullptr;
     QWidget* header_ = nullptr;
     QLabel* title_ = nullptr;

@@ -45,6 +45,20 @@ public:
     // in the terminal. A path that does not exist is also tried inside the open folder.
     bool openLocation(const QString& path, int line, int col);
     void setWorkspaceRoot(const QString& dir);
+    // Open a folder the way the user does (Open Folder, recent folders, drag and drop): a folder that is
+    // not trusted yet asks first whether to trust it. 'ask' false: Restricted Mode without asking.
+    void openFolder(const QString& dir, bool ask = true);
+
+    // ---- folder trust (Trust.h) ----
+    // Restricted Mode: the open folder is not trusted. Its files are read-only, the file manager cannot
+    // change anything, and nothing runs: no terminal, no Run (F5), no compiler check.
+    bool restricted() const;
+    bool fileTrusted(const QString& path) const;           // an untitled tab (empty path) is the user's own text
+    bool trustFolder(const QString& dir);                  // trusts it and leaves Restricted Mode for it
+    void untrustFolder(const QString& dir);                // back to Restricted Mode (closes the terminal)
+    bool askTrust(const QString& dir);                     // the "Do you trust the authors ...?" question
+    void manageTrustedFolders();                           // File > Manage Trusted Folders…
+    QWidget* trustBar() const { return trustBar_; }
     CodeView* currentView() const;
     int tabCount() const;
     CodeView* viewAt(int i) const;
@@ -176,6 +190,15 @@ private:
     QLabel* eolLabel_ = nullptr;
     QString root_;
     bool rootChosen_ = false;
+    QWidget* trustBar_ = nullptr;                          // "Restricted Mode" banner above the tabs
+    QLabel* trustText_ = nullptr;
+    QPushButton* restrictedBtn_ = nullptr;                 // status bar: "Restricted Mode", click to trust
+    QAction* trustAct_ = nullptr;                          // File > Trust This Folder / Restrict This Folder
+    void applyTrust();                                     // read-only tabs, explorer, terminal, banner
+    void applyTrustTo(CodeView* v);
+    bool runBlocked() const;                               // the current file may not be run or compiled
+    QString trustTarget() const;                           // what "Trust Folder" trusts: the open folder or the file's folder
+    void refuse(const QString& what);                      // status-bar message for something Restricted Mode does not allow
     int untitled_ = 0;
 
     bool bottomVisible() const;
@@ -205,6 +228,7 @@ private:
     QWidget* runCorner_ = nullptr;                         // keeps room for the Run / Stop group at the end of the tab strip
     QWidget* runGroup_ = nullptr;                          // the Run / Stop group itself
     void refreshRunButtons();
+    void formatBeforeSave(CodeView* v);                    // Settings > General > Format on save
     void placeRunGroup();
     QToolButton* runBtn_ = nullptr;                        // top right of the tabs: run the file (F5)
     QToolButton* stopBtn_ = nullptr;                       // ... and stop it (Shift+F5); enabled while something runs
